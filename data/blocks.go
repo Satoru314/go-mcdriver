@@ -30,6 +30,17 @@ type Block struct {
 	MinState     StateID
 	NumStates    int
 	DefaultState StateID // 置いたときの既定の状態
+
+	// ここから下は公式データに無いため、PrismarineJS の minecraft-data から取った値（生成時に公式データと
+	// ブロック名・状態 ID・プロパティを突き合わせ済み）。どれもブロックごとの値で、状態による違いは持たない。
+
+	Hardness        float32  // 硬さ（掘る時間の元）。-1 は壊せない（岩盤など）
+	BlastResistance float32  // 爆発耐性
+	Diggable        bool     // 掘って壊せるか（Hardness が -1 のものと空気は偽）
+	HarvestTools    []ItemID // 落とすのに必要な道具（ID の昇順）。nil ならどの道具でも素手でも落とす。空でない一覧のときは、そのどれかで掘らないと何も落とさない
+	EmitLight       uint8    // 出す光の強さ（0〜15）。状態によって変わるもの（点いたかまど、レッドストーンランプなど）の違いは入っていない
+	FilterLight     uint8    // 光が通り抜けるときに減る明るさ（0〜15。0 は素通し、15 は通さない）
+	Transparent     bool     // 透けて見えるか（minecraft-data の transparent）
 }
 
 var blockByName = func() map[string]*Block {
@@ -70,6 +81,23 @@ func (b *Block) Property(name string) (*Property, bool) {
 		}
 	}
 	return nil, false
+}
+
+// NeedsTool は、適した道具（HarvestTools）で掘らないと何も落とさないブロックかを返す。
+func (b *Block) NeedsTool() bool { return b.HarvestTools != nil }
+
+// CanHarvest は、item で掘ったときにブロックを落とすかを返す（道具が要らないブロックなら常に真）。
+// 素手は item に -1 などの無い ID を渡す。
+func (b *Block) CanHarvest(item ItemID) bool {
+	if b.HarvestTools == nil {
+		return true
+	}
+	for _, t := range b.HarvestTools {
+		if t == item {
+			return true
+		}
+	}
+	return false
 }
 
 // Default は既定の状態を返す。

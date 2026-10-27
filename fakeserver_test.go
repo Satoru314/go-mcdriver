@@ -82,8 +82,13 @@ func (s *fakeServer) read() protocol.Packet {
 
 // tickPackets は毎ティック送られるパケット（expect で読み飛ばす）。
 var tickPackets = map[int32]bool{
-	data.PlayServerboundMovePlayerPosRot: true,
-	data.PlayServerboundClientTickEnd:    true,
+	data.PlayServerboundMovePlayerPosRot:     true,
+	data.PlayServerboundMovePlayerPos:        true,
+	data.PlayServerboundMovePlayerRot:        true,
+	data.PlayServerboundMovePlayerStatusOnly: true,
+	data.PlayServerboundPlayerInput:          true,
+	data.PlayServerboundPlayerCommand:        true,
+	data.PlayServerboundClientTickEnd:        true,
 }
 
 // expect は id のパケットが来るまで読む。skip にあるものは読み飛ばし、それ以外が来たら失敗。

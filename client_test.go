@@ -70,20 +70,36 @@ func TestLoginToPlay(t *testing.T) {
 			// 相対（x と y を足す）。Player Loaded は 2 回目は送らない
 			s.teleport(packets.PlayerPosition{TeleportID: 6, X: 1, Y: 0.5, Z: 8, Flags: packets.RelX | packets.RelY}, 2.5, 64.5, 8, false)
 
-			// 毎ティック、同じ位置が送られる
+			// 動いていなければ（チャンクが無いので物理は進まない）位置は送らず、本家と同じく 20 ティックに 1 回だけ送る。
+			// それまでのティックは Client Tick End だけ
 			start := time.Now()
-			moves := 0
-			for moves < 5 {
-				d := s.expect(data.PlayServerboundMovePlayerPosRot, map[int32]bool{data.PlayServerboundClientTickEnd: true})
-				m, err := packets.ReadMovePlayerPosRot(d)
-				must(t, err)
-				if m.X != 2.5 || m.Y != 64.5 || m.Z != 8 || m.Flags&packets.MoveOnGround == 0 {
-					t.Fatalf("毎ティックの位置 %+v", m)
+			ticks := 0
+			for {
+				p := s.read()
+				if p.ID == data.PlayServerboundClientTickEnd {
+					ticks++
+					continue
 				}
-				moves++
+				if p.ID != data.PlayServerboundMovePlayerPos {
+					t.Fatalf("Client Tick End と Set Player Position のほかに 0x%02x が来た（%d ティック目）", p.ID, ticks)
+				}
+				d := protocol.NewDecoder(p.Data)
+				x, _ := d.ReadDouble()
+				y, _ := d.ReadDouble()
+				z, _ := d.ReadDouble()
+				fl, err := d.ReadUByte()
+				must(t, err)
+				if x != 2.5 || y != 64.5 || z != 8 || fl != 0 {
+					t.Fatalf("20 ティックごとの位置 (%v, %v, %v) flags=%x", x, y, z, fl)
+				}
+				break
 			}
-			if el := time.Since(start); el > time.Second {
-				t.Errorf("5 ティックに %v かかった", el)
+			// 強制修正の応答のあとの 20 ティック目（その前に修正と修正のあいだのティックがあれば少し減る）
+			if ticks < 15 || ticks > 20 {
+				t.Errorf("位置を送るまでのティック = %d、期待は 20 前後", ticks)
+			}
+			if el := time.Since(start); el > 2*time.Second {
+				t.Errorf("20 ティックに %v かかった", el)
 			}
 
 			// Play の Keep Alive と Ping

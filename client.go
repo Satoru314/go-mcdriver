@@ -109,7 +109,6 @@ func Connect(ctx context.Context, cfg Config) (*Client, error) {
 		c:        c,
 		reg:      conn.NewRegistries(),
 		state:    data.StateConfiguration,
-		onGround: true, // 物理ができるまでは「立っている」とする（浮いていると見なされて切られないように）
 		done:     make(chan struct{}),
 		info: conn.ClientInfo{
 			Locale:       cfg.Locale,
@@ -236,7 +235,7 @@ func (cl *Client) readLoop() {
 	}
 }
 
-// tickLoop は毎ティックの処理をする。今は位置をそのまま送るだけ（物理は後の単位）。
+// tickLoop は毎ティックの処理をする（物理を進めて位置を送る。controls.go）。
 func (cl *Client) tickLoop() {
 	defer cl.wg.Done()
 	t := time.NewTicker(TickInterval)
@@ -254,26 +253,24 @@ func (cl *Client) tickLoop() {
 	}
 }
 
-// tick は 1 ティック分の送信をする。
+// tick は 1 ティック分の処理をする。物理を 1 ティック進め、本家のクライアントと同じ決まりで位置などを送る。
 func (cl *Client) tick() error {
 	cl.mu.Lock()
 	defer cl.mu.Unlock()
 	if cl.state != data.StatePlay || !cl.hasPos {
 		return nil
 	}
-	if err := cl.sendPositionLocked(); err != nil {
+	if err := cl.moveTickLocked(); err != nil {
 		return err
 	}
 	// 1.21.2 から、公式のクライアントはティックの終わりに Client Tick End を送る
 	return cl.c.WritePacket(data.PlayServerboundClientTickEnd, nil)
 }
 
-// sendPositionLocked は今の位置と向きを送る。mu を持って呼ぶ。
-func (cl *Client) sendPositionLocked() error {
+// sendTeleportEchoLocked は位置の強制修正のあとに、今の位置と向きを送る。mu を持って呼ぶ。
+// 本家のクライアント（ClientPacketListener.handleMovePlayer）と同じく、接地と横の衝突は偽で送る。
+func (cl *Client) sendTeleportEchoLocked() error {
 	var flags uint8
-	if cl.onGround {
-		flags |= packets.MoveOnGround
-	}
 	return cl.c.Send(data.PlayServerboundMovePlayerPosRot, func(e *protocol.Encoder) error {
 		packets.WriteMovePlayerPosRot(e, packets.MovePlayerPosRot{
 			X: cl.x, Y: cl.y, Z: cl.z, Yaw: cl.yaw, Pitch: cl.pitch, Flags: flags,
@@ -351,7 +348,9 @@ func (cl *Client) handleCore(p protocol.Packet) error {
 func (cl *Client) onTeleport(pp packets.PlayerPosition) error {
 	cl.mu.Lock()
 	defer cl.mu.Unlock()
+	oldYaw, oldPitch := cl.yaw, cl.pitch
 	cl.x, cl.y, cl.z, cl.yaw, cl.pitch = pp.Apply(cl.x, cl.y, cl.z, cl.yaw, cl.pitch)
+	cl.moveOnTeleportLocked(pp, oldYaw, oldPitch) // 物理の状態（速さ）も合わせる
 	cl.hasPos = true
 	cl.teleports++
 	if err := cl.c.Send(data.PlayServerboundAcceptTeleportation, func(e *protocol.Encoder) error {
@@ -360,7 +359,7 @@ func (cl *Client) onTeleport(pp packets.PlayerPosition) error {
 	}); err != nil {
 		return err
 	}
-	if err := cl.sendPositionLocked(); err != nil {
+	if err := cl.sendTeleportEchoLocked(); err != nil {
 		return err
 	}
 	if !cl.loadedSent {

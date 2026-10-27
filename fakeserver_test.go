@@ -308,8 +308,8 @@ var testLoginPlay = packets.LoginPlay{
 // enterPlay は Login (play) を送る。
 func (s *fakeServer) enterPlay() {
 	s.t.Helper()
-	// 知らないパケット（Add Entity、中身はでたらめ）は読み飛ばされる
-	s.send(data.PlayClientboundAddEntity, func(e *protocol.Encoder) { e.WriteBytes([]byte{1, 2, 3, 4, 5}) })
+	// 知らないパケット（誰も登録していない Boss Event、中身はでたらめ）は読み飛ばされる
+	s.send(data.PlayClientboundBossEvent, func(e *protocol.Encoder) { e.WriteBytes([]byte{1, 2, 3, 4, 5}) })
 	s.send(data.PlayClientboundLogin, func(e *protocol.Encoder) { must(s.t, packets.WriteLoginPlay(e, testLoginPlay)) })
 }
 

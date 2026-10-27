@@ -72,13 +72,19 @@ func (cl *Client) Block(p BlockPos) (s data.BlockState, ok bool) {
 }
 
 // Light は位置 p の明るさ（ブロックの明るさと空の明るさ、どちらも 0〜15）を返す。
-// y は世界の一番下の 16 下から一番上の 16 上まで読める。
-// チャンクや明るさをまだ受け取っていなければ ok は false。空の明るさのないディメンションでは sky は 0。
+// y は世界の一番下の 16 下から一番上の 16 上まで読める（その外は ok=false）。
+//
+// 読み方は公式のクライアントと同じ:
+//   - サーバーは、何も無いセクション（ブロックの無い高いところなど）の明るさを送ってこない。
+//     そのようなセクションのブロックの明るさは 0。空の明るさは、上のセクションをたどって最初にデータのある
+//     セクションの一番下の層の、同じ x, z の値。上に何も無ければ 15（空の明るさの無いディメンションでは 0）
+//   - チャンクを受け取っていない場所は ok=false
 //
 // サーバーは、ブロックが変わったあとの明るさの変化を送ってこないことがある
 // （公式のサーバーは見えている範囲の端のチャンクにしか送らず、クライアントが自分で計算する決まり。
-// このドライバは明るさを計算しない）。そのため、ブロックが変わったセクションとその周り 26 個のセクション
-// （光は最大 15 ブロック届く）は、そこの明るさがまた届くまで ok が false になる（古い値は返さない）。
+// このドライバは明るさを計算しない）。そのため、ブロックが変わると、そのセクションの周り（3×3×3 のセクション）と、
+// その下のセクション全部（空の明るさは影として下へいくらでも届く）に「古い」の印を付け、
+// そこの明るさがまた届くまで ok=false を返す（古い値は返さない）。
 func (cl *Client) Light(p BlockPos) (block, sky int, ok bool) {
 	ws := worldKey.of(cl)
 	ws.mu.RLock()
@@ -93,18 +99,29 @@ func (cl *Client) Light(p BlockPos) (block, sky int, ok bool) {
 	if c == nil {
 		return 0, 0, false
 	}
-	block, ok, err := c.BlockLight(p.X&15, p.Y, p.Z&15)
-	if err != nil || !ok {
+	// 明るさのセクションの番号（0 がワールドの一番下のセクションの 1 つ下）
+	i := (p.Y-c.Format.MinY)>>4 + 1
+	n := len(c.Light.Sky)
+	if i < 0 || i >= n {
 		return 0, 0, false
+	}
+	x, y, z := p.X&15, p.Y&15, p.Z&15
+	if arr := c.Light.Block[i]; arr != nil {
+		block = chunk.Nibble(arr, x, y, z)
 	}
 	if !ws.dim.HasSkylight {
 		return block, 0, true
 	}
-	sky, ok, err = c.SkyLight(p.X&15, p.Y, p.Z&15)
-	if err != nil || !ok {
-		return 0, 0, false
+	if arr := c.Light.Sky[i]; arr != nil {
+		return block, chunk.Nibble(arr, x, y, z), true
 	}
-	return block, sky, true
+	// データの無いセクション: 上へたどって最初にデータのあるセクションの一番下の層
+	for j := i + 1; j < n; j++ {
+		if arr := c.Light.Sky[j]; arr != nil {
+			return block, chunk.Nibble(arr, x, 0, z), true
+		}
+	}
+	return block, 15, true
 }
 
 // Dimension は今いるディメンションの情報を返す。
@@ -487,11 +504,13 @@ func (cl *Client) worldOnLightUpdate(d *protocol.Decoder) error {
 
 // markStaleAround は sp とその周り 26 個のセクションの明るさに「古い」の印を付ける。mu を持って呼ぶ。
 // 光は最大 15 ブロック届くので、セクションの角のブロックが変わると斜めの隣のセクションまで変わりうる。
+// さらに、その下のセクションにも全部印を付ける（上にブロックが増えたり減ったりすると、空の明るさの影は下へいくらでも届く）。
 func (ws *worldState) markStaleAround(sp chunk.SectionPos) {
+	lo, _ := ws.lightSectionRange()
 	for dx := -1; dx <= 1; dx++ {
-		for dy := -1; dy <= 1; dy++ {
-			for dz := -1; dz <= 1; dz++ {
-				ws.staleLight[chunk.SectionPos{X: sp.X + dx, Y: sp.Y + dy, Z: sp.Z + dz}] = struct{}{}
+		for dz := -1; dz <= 1; dz++ {
+			for y := min(lo, sp.Y-1); y <= sp.Y+1; y++ {
+				ws.staleLight[chunk.SectionPos{X: sp.X + dx, Y: y, Z: sp.Z + dz}] = struct{}{}
 			}
 		}
 	}

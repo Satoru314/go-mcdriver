@@ -32,6 +32,10 @@ type worldState struct {
 	mu  sync.RWMutex
 	w   *chunk.World // Login (play) の前は nil
 	dim Dimension
+	// staleLight は明るさが古いかもしれないセクション（セクションの座標）。
+	// サーバーはブロックの変化のあと明るさを送ってこないことがある（見えている範囲の端のチャンクにしか送らない）ので、
+	// ブロックが変わったら印を付け、そのセクションの明るさが届いたら消す
+	staleLight map[chunk.SectionPos]struct{}
 
 	// チャンクを受け取る速さの見積もり（受信の goroutine だけが触るので鍵は要らない）
 	batch chunkBatchRate
@@ -70,11 +74,19 @@ func (cl *Client) Block(p BlockPos) (s data.BlockState, ok bool) {
 // Light は位置 p の明るさ（ブロックの明るさと空の明るさ、どちらも 0〜15）を返す。
 // y は世界の一番下の 16 下から一番上の 16 上まで読める。
 // チャンクや明るさをまだ受け取っていなければ ok は false。空の明るさのないディメンションでは sky は 0。
+//
+// サーバーは、ブロックが変わったあとの明るさの変化を送ってこないことがある
+// （公式のサーバーは見えている範囲の端のチャンクにしか送らず、クライアントが自分で計算する決まり。
+// このドライバは明るさを計算しない）。そのため、ブロックが変わったセクションとその周り 26 個のセクション
+// （光は最大 15 ブロック届く）は、そこの明るさがまた届くまで ok が false になる（古い値は返さない）。
 func (cl *Client) Light(p BlockPos) (block, sky int, ok bool) {
 	ws := worldKey.of(cl)
 	ws.mu.RLock()
 	defer ws.mu.RUnlock()
 	if ws.w == nil {
+		return 0, 0, false
+	}
+	if _, stale := ws.staleLight[chunk.SectionPos{X: p.X >> 4, Y: p.Y >> 4, Z: p.Z >> 4}]; stale {
 		return 0, 0, false
 	}
 	c := ws.w.Column(int32(p.X>>4), int32(p.Z>>4))
@@ -249,6 +261,7 @@ func (cl *Client) worldReset(dimType int32, dimName string) error {
 	ws := worldKey.of(cl)
 	ws.mu.Lock()
 	ws.w, ws.dim = w, dim
+	ws.staleLight = map[chunk.SectionPos]struct{}{}
 	ws.mu.Unlock()
 	return nil
 }
@@ -357,7 +370,20 @@ func (cl *Client) worldOnChunk(d *protocol.Decoder) error {
 	ws.mu.Lock()
 	// 展開しているあいだに入れ替わっていないか（受信の goroutine は 1 つなので起きないが念のため）
 	if ws.w == w {
+		replaced := w.Column(col.X, col.Z) != nil
 		w.Put(col)
+		// このチャンクの明るさは今届いたので新しい
+		ws.clearStaleColumn(col.X, col.Z)
+		if replaced {
+			// 差し替え: 中身がどう変わったか分からないので、隣のチャンクの明るさを全部古いとする
+			for dx := int32(-1); dx <= 1; dx++ {
+				for dz := int32(-1); dz <= 1; dz++ {
+					if dx != 0 || dz != 0 {
+						ws.markStaleColumn(col.X+dx, col.Z+dz)
+					}
+				}
+			}
+		}
 	}
 	ws.mu.Unlock()
 	return nil
@@ -377,6 +403,7 @@ func (cl *Client) worldOnForget(d *protocol.Decoder) error {
 	ws.mu.Lock()
 	if ws.w != nil {
 		ws.w.Unload(x, z)
+		ws.clearStaleColumn(x, z)
 	}
 	ws.mu.Unlock()
 	return nil
@@ -398,9 +425,13 @@ func (cl *Client) worldOnBlockUpdate(d *protocol.Decoder) error {
 	if ws.w == nil {
 		return nil
 	}
-	if err := ws.w.SetBlock(int(pos.X), int(pos.Y), int(pos.Z), id); err != nil && !ignorable(err) {
+	if err := ws.w.SetBlock(int(pos.X), int(pos.Y), int(pos.Z), id); err != nil {
+		if ignorable(err) {
+			return nil
+		}
 		return fmt.Errorf("mcdriver: Block Update %v: %w", pos, err)
 	}
+	ws.markStaleAround(chunk.SectionPos{X: int(pos.X) >> 4, Y: int(pos.Y) >> 4, Z: int(pos.Z) >> 4})
 	return nil
 }
 
@@ -415,9 +446,13 @@ func (cl *Client) worldOnSectionUpdate(d *protocol.Decoder) error {
 	if ws.w == nil {
 		return nil
 	}
-	if err := ws.w.ApplySectionUpdate(sp, changes); err != nil && !ignorable(err) {
+	if err := ws.w.ApplySectionUpdate(sp, changes); err != nil {
+		if ignorable(err) {
+			return nil
+		}
 		return fmt.Errorf("mcdriver: Update Section Blocks %+v: %w", sp, err)
 	}
+	ws.markStaleAround(sp)
 	return nil
 }
 
@@ -440,7 +475,52 @@ func (cl *Client) worldOnLightUpdate(d *protocol.Decoder) error {
 	if err := c.ApplyLight(ld); err != nil {
 		return fmt.Errorf("mcdriver: Update Light (%d, %d): %w", x, z, err)
 	}
+	// 明るさが届いたセクションの印を消す（明るさのセクション i は、ワールドの一番下のセクションの 1 つ下から数える）
+	base := ws.w.Format.MinY>>4 - 1
+	for i := range ws.w.Format.LightSections() {
+		if ld.SkyMask.Get(i) || ld.BlockMask.Get(i) || ld.EmptySkyMask.Get(i) || ld.EmptyBlockMask.Get(i) {
+			delete(ws.staleLight, chunk.SectionPos{X: int(x), Y: base + i, Z: int(z)})
+		}
+	}
 	return nil
+}
+
+// markStaleAround は sp とその周り 26 個のセクションの明るさに「古い」の印を付ける。mu を持って呼ぶ。
+// 光は最大 15 ブロック届くので、セクションの角のブロックが変わると斜めの隣のセクションまで変わりうる。
+func (ws *worldState) markStaleAround(sp chunk.SectionPos) {
+	for dx := -1; dx <= 1; dx++ {
+		for dy := -1; dy <= 1; dy++ {
+			for dz := -1; dz <= 1; dz++ {
+				ws.staleLight[chunk.SectionPos{X: sp.X + dx, Y: sp.Y + dy, Z: sp.Z + dz}] = struct{}{}
+			}
+		}
+	}
+}
+
+// lightSectionRange は明るさのあるセクションの y の範囲（両端を含む）を返す。
+func (ws *worldState) lightSectionRange() (lo, hi int) {
+	f := ws.w.Format
+	lo = f.MinY>>4 - 1
+	return lo, lo + f.LightSections() - 1
+}
+
+// markStaleColumn はチャンク (x, z) の全部のセクションに印を付ける。読み込んでいなければ何もしない。mu を持って呼ぶ。
+func (ws *worldState) markStaleColumn(x, z int32) {
+	if ws.w.Column(x, z) == nil {
+		return
+	}
+	lo, hi := ws.lightSectionRange()
+	for y := lo; y <= hi; y++ {
+		ws.staleLight[chunk.SectionPos{X: int(x), Y: y, Z: int(z)}] = struct{}{}
+	}
+}
+
+// clearStaleColumn はチャンク (x, z) の印を全部消す。mu を持って呼ぶ。
+func (ws *worldState) clearStaleColumn(x, z int32) {
+	lo, hi := ws.lightSectionRange()
+	for y := lo; y <= hi; y++ {
+		delete(ws.staleLight, chunk.SectionPos{X: int(x), Y: y, Z: int(z)})
+	}
 }
 
 func (cl *Client) worldOnBatchStart(*protocol.Decoder) error {

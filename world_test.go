@@ -345,6 +345,46 @@ func TestWorldFromFakeServer(t *testing.T) {
 	checkBlock(t, c, BlockPos{0, -64, 0}, air)
 	checkBlock(t, c, BlockPos{1, -64, 0}, stone)
 
+	// ブロックが変わったセクションと、その周り 26 個のセクションの明るさは古いので ok=false
+	lightOK := func(p BlockPos) bool { _, _, ok := c.Light(p); return ok }
+	for _, p := range []BlockPos{{3, 0, 5}, {3, 17, 5}, {3, -1, 5}, {-1, 0, 0}, {1, -64, 0}, {1, -50, 0}, {1, -80, 0}} {
+		if lightOK(p) {
+			t.Errorf("ブロックが変わったあと Light%v が ok", p)
+		}
+	}
+	if !lightOK(BlockPos{3, 40, 5}) {
+		t.Error("離れたセクションの Light が ok でない")
+	}
+	// そのセクションの明るさが Update Light で届けば印が消える（ほかのセクションは古いまま）
+	s.send(data.PlayClientboundLightUpdate, func(e *protocol.Encoder) {
+		e.WriteVarInt(0)
+		e.WriteVarInt(0)
+		var m protocol.BitSet
+		m.Set(5)
+		e.WriteBitSet(nil)
+		e.WriteBitSet(m) // block light だけ
+		e.WriteBitSet(nil)
+		e.WriteBitSet(nil)
+		e.WriteVarInt(0)
+		e.WriteVarInt(1)
+		e.WritePrefixedBytes(lightOf(func(x, y, z int) int { return 9 }))
+	})
+	s.sync()
+	if b, sk, ok := c.Light(BlockPos{3, 0, 5}); !ok || b != 9 || sk != 4 {
+		t.Errorf("明るさが届いたあと Light(3,0,5) = %d %d %v、期待 9 4", b, sk, ok)
+	}
+	if lightOK(BlockPos{3, 17, 5}) {
+		t.Error("明るさが届いていないセクションが ok")
+	}
+	// チャンクのデータが届けば、そのチャンクの印は全部消える
+	s.sendChunks(col0)
+	for _, p := range []BlockPos{{3, 17, 5}, {1, -64, 0}} {
+		if !lightOK(p) {
+			t.Errorf("チャンクを受け取り直したのに Light%v が ok でない", p)
+		}
+	}
+	checkBlock(t, c, BlockPos{3, 0, 5}, stairs) // 受け取り直した中身に戻る
+
 	// WorldView: 2 つのチャンクと、受け取っていないチャンク (1, 0) と高さの外にまたがる範囲
 	v, err := c.WorldView(BlockPos{20, -70, 3}, BlockPos{-20, 12, 6})
 	if err != nil {

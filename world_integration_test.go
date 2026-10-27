@@ -1,12 +1,11 @@
 //go:build integration
 
-// 単位 4（地形）を本物のサーバー（Docker の Paper 1.21.4、平らなワールド）で確かめるテスト。
-// 普段の go test では動かない。テスト用サーバーを立てて繋ぐ:
+// 単位 4（地形）を本物のサーバー（internal/testserver の Paper 1.21.4、平らなワールド）で確かめるテスト。
+// 普段の go test では動かない:
 //
-//	MCDRIVER_ADDR=127.0.0.1:25765 MCDRIVER_RCON=127.0.0.1:25775 MCDRIVER_RCON_PASS=... \
-//	  go test -tags integration -run TestWorldIntegration -v -count=1 -timeout 110s .
+//	sg docker -c 'go test -tags integration -run TestWorldIntegration -v -count=1 -timeout 110s .'
 //
-// RCON と道具（check3DialRCON, check3Env）は check3_integration_test.go のものを使う。
+// テストは自分の区画（testserver.NewArea）の中だけでブロックを置く。
 package mcdriver
 
 import (
@@ -22,6 +21,8 @@ import (
 	"github.com/Satoru314/go-mcdriver/internal/chunk"
 	"github.com/Satoru314/go-mcdriver/internal/nbt"
 	"github.com/Satoru314/go-mcdriver/internal/protocol"
+	"github.com/Satoru314/go-mcdriver/internal/rcon"
+	"github.com/Satoru314/go-mcdriver/internal/testserver"
 	"gonum.org/v1/gonum/spatial/r3"
 )
 
@@ -210,20 +211,26 @@ func waitBlock(c *Client, p BlockPos, want data.StateID, d time.Duration) (data.
 	}
 }
 
-func rconMust(t *testing.T, rc *check3RCON, cmd string) string {
+func rconMust(t *testing.T, rc *rcon.Client, cmd string) string {
 	t.Helper()
-	out, err := rc.command(cmd)
-	if err != nil {
-		t.Fatalf("RCON %q: %v", cmd, err)
-	}
-	return out
+	return testserver.Command(t, rc, cmd)
 }
 
 func connectBot(t *testing.T, addr, name string) *Client {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	c, err := Connect(ctx, Config{Addr: addr, Username: name, ViewDistance: 4})
+	var c *Client
+	var err error
+	for try := 0; try < 3; try++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		c, err = Connect(ctx, Config{Addr: addr, Username: name, ViewDistance: 4})
+		cancel()
+		// Paper は同じアドレスからの接続を 4 秒あけないと断る（connection-throttle）。
+		// 断られた接続も「最後の接続」として数えられるので、4 秒より長く待ってからやり直す
+		if err == nil || !strings.Contains(err.Error(), "throttled") {
+			break
+		}
+		time.Sleep(5 * time.Second)
+	}
 	if err != nil {
 		t.Fatalf("Connect %s: %v", name, err)
 	}
@@ -271,22 +278,55 @@ func waitLoaded(t *testing.T, c *Client, p BlockPos, r int) {
 	}
 }
 
+// moveBot は RCON の tp で bot を (x, StandY, z) の地表に立たせ、そのまわりのチャンクが届くまで待つ。
+func moveBot(t *testing.T, rc *rcon.Client, c *Client, x, z int) BlockPos {
+	t.Helper()
+	c.mu.Lock()
+	before := c.teleports
+	c.mu.Unlock()
+	out := rconMust(t, rc, fmt.Sprintf("tp %s %d.5 %d %d.5", c.cfg.Username, x, testserver.StandY, z))
+	if !strings.Contains(out, "Teleported") {
+		t.Fatalf("tp: %q", out)
+	}
+	end := time.Now().Add(10 * time.Second)
+	for {
+		c.mu.Lock()
+		n := c.teleports
+		c.mu.Unlock()
+		if n > before {
+			break
+		}
+		if time.Now().After(end) {
+			t.Fatal("tp の強制修正が届かない")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	p := botBlockPos(t, c)
+	if p != (BlockPos{x, testserver.StandY, z}) {
+		t.Fatalf("tp のあとの位置 %v", p)
+	}
+	waitLoaded(t, c, p, 32)
+	return p
+}
+
 // ---- テスト ----
 
 func TestWorldIntegration(t *testing.T) {
-	addr := check3Env(t, "MCDRIVER_ADDR")
-	rconAddr := check3Env(t, "MCDRIVER_RCON")
-	rconPass := check3Env(t, "MCDRIVER_RCON_PASS")
-	rc, err := check3DialRCON(rconAddr, rconPass)
-	if err != nil {
-		t.Fatalf("RCON: %v", err)
-	}
-	defer rc.close()
+	ts := testserver.Start(t)
+	rc := ts.RCON(t)
+	area := ts.NewArea(t)
+	area.ForceLoad(t, rc)
+	defer func() {
+		if t.Failed() {
+			t.Logf("サーバーのログ（最後の 40 行）:\n%s", testserver.Logs(context.Background(), 40))
+		}
+	}()
+	X0, Z0 := area.X0, area.Z0
 
 	start := time.Now()
-	c := connectBot(t, addr, "worldbot")
-	feet := botBlockPos(t, c)
-	waitLoaded(t, c, feet, 32)
+	c := connectBot(t, ts.GameAddr, area.BotName)
+	cx, cz := area.Center()
+	feet := moveBot(t, rc, c, cx, cz)
 	t.Logf("bot の足元 %v、チャンク %d 個が %v で届いた。Dimension %+v、バイオームの registry %d 個",
 		feet, c.LoadedChunks(), time.Since(start), c.Dimension(), len(c.reg.Entries("minecraft:worldgen/biome")))
 
@@ -294,8 +334,8 @@ func TestWorldIntegration(t *testing.T) {
 	t.Run("地表", func(t *testing.T) {
 		want := map[int]string{-64: "bedrock", -63: "dirt", -62: "dirt", -61: "grass_block[snowy=false]", -60: "air", -59: "air", 0: "air"}
 		bad := 0
-		for dx := -24; dx <= 24; dx += 3 {
-			for dz := -24; dz <= 24; dz += 3 {
+		for dx := -14; dx <= 14; dx += 2 {
+			for dz := -14; dz <= 14; dz += 2 {
 				p := feet.Offset(dx, 0, dz)
 				for y, w := range want {
 					got, ok := c.Block(BlockPos{p.X, y, p.Z})
@@ -314,18 +354,64 @@ func TestWorldIntegration(t *testing.T) {
 						break
 					}
 				}
-				if top != -61 {
-					t.Errorf("(%d, %d) の地表の高さ %d、期待 -61", p.X, p.Z, top)
+				if top != testserver.SurfaceY {
+					t.Errorf("(%d, %d) の地表の高さ %d、期待 %d", p.X, p.Z, top, testserver.SurfaceY)
 				}
 			}
 		}
-		if feet.Y != -60 {
-			t.Errorf("bot の足元の y = %d、期待 -60", feet.Y)
+	})
+
+	// 2. チャンクのデータで届いた明るさ: 空の下は block 0 / sky 15、土の中は sky 0
+	t.Run("明るさ", func(t *testing.T) {
+		for _, p := range []BlockPos{feet, {X0 + 28, testserver.StandY, Z0 + 28}, {X0 + 3, testserver.StandY, Z0 + 3}} {
+			if b, sky, ok := c.Light(p); !ok || sky != 15 || b != 0 {
+				t.Errorf("空の下 %v: block %d sky %d ok %v、期待 0 15", p, b, sky, ok)
+			}
+			if _, sky, ok := c.Light(p.Offset(0, -2, 0)); !ok || sky != 0 {
+				t.Errorf("土の中 %v: sky %d ok %v、期待 0", p.Offset(0, -2, 0), sky, ok)
+			}
+		}
+		// ブロックの無い高いところ（サーバーが明るさの配列を送ってこないセクション）。公式のクライアントでは空の明るさ 15
+		for _, y := range []int{-20, 10, 200} {
+			p := feet.Offset(0, y-feet.Y, 0)
+			if b, sky, ok := c.Light(p); !ok || sky != 15 || b != 0 {
+				t.Errorf("高い空中 %v: block %d sky %d ok %v、期待 0 15", p, b, sky, ok)
+			}
 		}
 	})
 
-	// 2. RCON の setblock / fill で置いたものと Block() が一致する
-	base := feet.Offset(4, 0, 4) // y=-60（草の上の空気）
+	// 3. 光る石を置いたあと、そのまわりの Light() は古い値を返さない（ok=false か、届いた正しい値）
+	t.Run("光る石のあとの明るさ", func(t *testing.T) {
+		// サーバーが明るさの配列を送ってくる、地表の近くのセクション。ほかの項目より先に行う（ブロックを変えると周りが古くなるため）
+		lamp := BlockPos{X0 + 28, testserver.StandY + 3, Z0 + 12}
+		next := lamp.Offset(1, 0, 0)
+		if b, sky, ok := c.Light(next); !ok || b != 0 || sky != 15 {
+			t.Fatalf("置く前の %v: block %d sky %d ok %v、期待 0 15", next, b, sky, ok)
+		}
+		rconMust(t, rc, fmt.Sprintf("setblock %d %d %d minecraft:glowstone", lamp.X, lamp.Y, lamp.Z))
+		glow := fullState(t, "glowstone")
+		if got, ok := waitBlock(c, lamp, glow.ID, 3*time.Second); !ok || got.ID != glow.ID {
+			t.Fatalf("光る石が届かない: %v", got)
+		}
+		check := func(when string) {
+			for _, q := range []struct {
+				p    BlockPos
+				want int
+			}{{next, 14}, {lamp.Offset(3, 0, 0), 12}, {lamp.Offset(0, 0, 14), 1}} {
+				b, sky, ok := c.Light(q.p)
+				t.Logf("%s %v: block %d sky %d ok %v", when, q.p, b, sky, ok)
+				if ok && b != q.want {
+					t.Errorf("%s %v: 古い明るさ block %d を返した（ok=true）。正しくは %d", when, q.p, b, q.want)
+				}
+			}
+		}
+		check("直後")
+		time.Sleep(2 * time.Second)
+		check("2 秒後")
+	})
+
+	// 4. RCON の setblock / fill で置いたものと Block() が一致する。変えたら反映される
+	base := BlockPos{X0 + 2, testserver.StandY, Z0 + 2}
 	t.Run("setblockとfill", func(t *testing.T) {
 		type place struct {
 			p     BlockPos
@@ -372,7 +458,7 @@ func TestWorldIntegration(t *testing.T) {
 		}
 
 		// fill: チャンクの境目とセクションの境目をまたぐ範囲（Update Section Blocks がいくつも来る）
-		a, b := base.Offset(-20, 10, -20), base.Offset(-2, 20, -14)
+		a, b := BlockPos{X0 + 2, testserver.StandY + 10, Z0 + 20}, BlockPos{X0 + 20, testserver.StandY + 20, Z0 + 26}
 		out := rconMust(t, rc, fmt.Sprintf("fill %d %d %d %d %d %d minecraft:oak_planks", a.X, a.Y, a.Z, b.X, b.Y, b.Z))
 		t.Logf("fill: %q", out)
 		planks := fullState(t, "oak_planks")
@@ -407,7 +493,7 @@ func TestWorldIntegration(t *testing.T) {
 			time.Sleep(20 * time.Millisecond)
 		}
 
-		// 3. 変えたら反映される: 階段を石に、石を空気に
+		// 変えたら反映される: 階段を石に、石を空気に
 		p := places[0].p
 		rconMust(t, rc, fmt.Sprintf("setblock %d %d %d minecraft:stone", p.X, p.Y, p.Z))
 		if got, _ := waitBlock(c, p, fullState(t, "stone").ID, 3*time.Second); got.Name() != "stone" {
@@ -421,46 +507,6 @@ func TestWorldIntegration(t *testing.T) {
 		rconMust(t, rc, fmt.Sprintf("fill %d %d %d %d %d %d minecraft:air", a.X, a.Y, a.Z, b.X, b.Y, b.Z))
 		if got, _ := waitBlock(c, a, fullState(t, "air").ID, 3*time.Second); got.Name() != "air" {
 			t.Errorf("fill で空気にしたのに %v", got)
-		}
-	})
-
-	// 4. 明るさ: 空の下は空の明るさ 15、光るブロックの隣はブロックの明るさ 14
-	t.Run("明るさ", func(t *testing.T) {
-		open := feet.Offset(-6, 0, 6)
-		if b, sky, ok := c.Light(open); !ok || sky != 15 || b != 0 {
-			t.Errorf("空の下 %v: block %d sky %d ok %v、期待 0 15", open, b, sky, ok)
-		}
-		if _, sky, ok := c.Light(open.Offset(0, -2, 0)); !ok || sky != 0 {
-			t.Errorf("土の中 sky %d ok %v、期待 0", sky, ok)
-		}
-		lamp := feet.Offset(-6, 3, -6)
-		rconMust(t, rc, fmt.Sprintf("setblock %d %d %d minecraft:glowstone", lamp.X, lamp.Y, lamp.Z))
-		next := lamp.Offset(1, 0, 0)
-		end := time.Now().Add(5 * time.Second)
-		var b, sky int
-		var ok bool
-		for time.Now().Before(end) {
-			if b, sky, ok = c.Light(next); ok && b == 14 {
-				break
-			}
-			time.Sleep(20 * time.Millisecond)
-		}
-		if !ok || b != 14 {
-			t.Errorf("光る石の隣 %v: block %d sky %d ok %v、期待 block 14", next, b, sky, ok)
-		}
-		if b2, _, _ := c.Light(lamp.Offset(3, 0, 0)); b2 != 12 {
-			t.Errorf("光る石から 3 つ先 block %d、期待 12", b2)
-		}
-		rconMust(t, rc, fmt.Sprintf("setblock %d %d %d minecraft:air", lamp.X, lamp.Y, lamp.Z))
-		end = time.Now().Add(5 * time.Second)
-		for time.Now().Before(end) {
-			if b, _, ok = c.Light(next); ok && b == 0 {
-				break
-			}
-			time.Sleep(20 * time.Millisecond)
-		}
-		if b != 0 {
-			t.Errorf("光る石を消したあと block %d、期待 0", b)
 		}
 	})
 
@@ -479,11 +525,11 @@ func TestWorldIntegration(t *testing.T) {
 				}
 			}
 		}
-		// セクション（y=0〜15）の、bot の隣のチャンク
-		cx, cz := (feet.X>>4)+1, feet.Z>>4
+		// 区画の中にすっぽり入るチャンクの、セクション y=0〜15
+		pcx, pcz := (X0+15)>>4, (Z0+15)>>4
 		var placed []place2
 		for i, st := range states {
-			p := BlockPos{cx*16 + i%16, 0 + i/256, cz*16 + (i/16)%16}
+			p := BlockPos{pcx*16 + i%16, i / 256, pcz*16 + (i/16)%16}
 			out := rconMust(t, rc, fmt.Sprintf("setblock %d %d %d minecraft:%s", p.X, p.Y, p.Z, st.String()))
 			if strings.Contains(out, "Changed") {
 				placed = append(placed, place2{p, st})
@@ -498,22 +544,23 @@ func TestWorldIntegration(t *testing.T) {
 		// 今の bot には Update Section Blocks で届く
 		for _, pl := range placed {
 			if got, ok := waitBlock(c, pl.p, pl.st.ID, 3*time.Second); !ok || got.ID != pl.st.ID {
-				t.Fatalf("worldbot: %v = %v（ok=%v）、置いたのは %v", pl.p, got, ok, pl.st)
+				t.Fatalf("%s: %v = %v（ok=%v）、置いたのは %v", area.BotName, pl.p, got, ok, pl.st)
 			}
 		}
 		// 別の bot はチャンクのデータ（パレットなし）で受け取る
-		c2 := connectBot(t, addr, "worldbot2")
-		waitLoaded(t, c2, BlockPos{cx * 16, 0, cz * 16}, 0)
+		name2 := area.BotName + "b"
+		c2 := connectBot(t, ts.GameAddr, name2)
+		moveBot(t, rc, c2, pcx*16+8, pcz*16+8)
 		wrong := 0
 		for _, pl := range placed {
 			if got, ok := c2.Block(pl.p); !ok || got.ID != pl.st.ID {
 				if wrong < 5 {
-					t.Errorf("worldbot2: %v = %v（ok=%v）、置いたのは %v", pl.p, got, ok, pl.st)
+					t.Errorf("%s: %v = %v（ok=%v）、置いたのは %v", name2, pl.p, got, ok, pl.st)
 				}
 				wrong++
 			}
 		}
-		stats := logPaletteStats(t, "worldbot2")
+		stats := logPaletteStats(t, name2)
 		direct := 0
 		for k, v := range stats {
 			if strings.HasPrefix(k, "blocks") && strings.Contains(k, "パレットなし") {
@@ -524,18 +571,15 @@ func TestWorldIntegration(t *testing.T) {
 		if direct == 0 {
 			t.Error("パレットなしのセクションが届いていない")
 		}
-		// 片付け
-		rconMust(t, rc, fmt.Sprintf("fill %d 0 %d %d 1 %d minecraft:air", cx*16, cz*16, cx*16+15, cz*16+15))
 	})
 
-	logPaletteStats(t, "worldbot")
-	logPacketCounts(t, "worldbot")
+	logPaletteStats(t, area.BotName)
+	logPacketCounts(t, area.BotName)
 	c.mu.Lock()
 	tp := c.teleports
 	c.mu.Unlock()
-	t.Logf("強制修正 %d 回（ログインの 1 回だけが期待）、送った Chunk Batch Received の最後の値 %.1f",
-		tp, worldKey.of(c).batch.desiredChunksPerTick())
-	if tp != 1 {
+	t.Logf("強制修正 %d 回（ログインと tp の 2 回が期待）", tp)
+	if tp != 2 {
 		t.Errorf("強制修正 %d 回", tp)
 	}
 	select {
@@ -543,9 +587,6 @@ func TestWorldIntegration(t *testing.T) {
 		t.Errorf("切断された: %v", c.Err())
 	default:
 	}
-	// 置いたものを片付ける
-	rconMust(t, rc, fmt.Sprintf("fill %d -61 %d %d -50 %d minecraft:air", base.X-22, base.Z-22, base.X+14, base.Z+8))
-	rconMust(t, rc, fmt.Sprintf("fill %d -61 %d %d -61 %d minecraft:grass_block", base.X-22, base.Z-22, base.X+14, base.Z+8))
 }
 
 type place2 struct {

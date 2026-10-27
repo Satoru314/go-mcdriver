@@ -1,7 +1,7 @@
 // Package mcdriver は Minecraft Java Edition 1.21.4 に bot をログインさせ、
 // ゲームの情報を受け取り、行動を指示するためのドライバ。
 //
-// 今はログインと接続の維持、地形（Block, Light, WorldView）の受け取りができる。
+// ログインと接続の維持、地形（Block, Light, WorldView）の受け取り、物理と移動（SetControls, Look, LookAt）ができる。
 //
 //	c, err := mcdriver.Connect(ctx, mcdriver.Config{Addr: "localhost:25565", Username: "bot1"})
 //	if err != nil { ... }
@@ -105,11 +105,11 @@ func Connect(ctx context.Context, cfg Config) (*Client, error) {
 	}
 
 	cl := &Client{
-		cfg:      cfg,
-		c:        c,
-		reg:      conn.NewRegistries(),
-		state:    data.StateConfiguration,
-		done:     make(chan struct{}),
+		cfg:   cfg,
+		c:     c,
+		reg:   conn.NewRegistries(),
+		state: data.StateConfiguration,
+		done:  make(chan struct{}),
 		info: conn.ClientInfo{
 			Locale:       cfg.Locale,
 			ViewDistance: int8(min(max(cfg.ViewDistance, 0), 32)),

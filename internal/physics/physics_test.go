@@ -58,7 +58,7 @@ func TestFallAndLand(t *testing.T) {
 	if !p.OnGround || p.Pos.Y != 1 {
 		t.Fatalf("着地しない: OnGround=%v y=%v（%d ティック）", p.OnGround, p.Pos.Y, ticks)
 	}
-	// 9 ブロックの落下は本家で 24 ティック前後（y の速さ: (v-0.08)*0.98）
+	// y の速さは毎ティック (v-0.08)*0.98。9 ブロックの落下は 17 ティック
 	t.Logf("高さ 9 から %d ティックで着地", ticks)
 	for range 40 {
 		p.Tick(w, Input{})

@@ -11,6 +11,7 @@ package mcdriver
 //     どちらも無く接地か横の衝突が変わっていれば Status Only。何も変わらなければ送らない
 
 import (
+	"fmt"
 	"math"
 
 	"github.com/Satoru314/go-mcdriver/data"
@@ -55,6 +56,29 @@ func init() {
 		ms.p = physics.Player{}
 		return nil
 	})
+	onPlay(data.PlayClientboundSetEntityMotion, (*Client).moveOnMotion)
+}
+
+// moveOnMotion は Set Entity Motion が自分のものなら速さにする（ノックバックなど。本家は setDeltaMovement）。
+// 中身: エンティティ ID（VarInt）、速度 x, y, z（Short、1/8000 ブロック/ティック）。
+func (cl *Client) moveOnMotion(d *protocol.Decoder) error {
+	id, err := d.ReadVarInt()
+	if err != nil {
+		return fmt.Errorf("mcdriver: Set Entity Motion: %w", err)
+	}
+	var v [3]int16
+	for i := range v {
+		if v[i], err = d.ReadShort(); err != nil {
+			return fmt.Errorf("mcdriver: Set Entity Motion: %w", err)
+		}
+	}
+	cl.mu.Lock()
+	defer cl.mu.Unlock()
+	if id != cl.login.EntityID {
+		return nil
+	}
+	moveKey.of(cl).p.Vel = r3.Vec{X: float64(v[0]) / 8000, Y: float64(v[1]) / 8000, Z: float64(v[2]) / 8000}
+	return nil
 }
 
 // SetControls は移動の操作を設定する。次のティックから効く。

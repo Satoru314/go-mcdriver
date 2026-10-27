@@ -218,19 +218,14 @@ func rconMust(t *testing.T, rc *rcon.Client, cmd string) string {
 
 func connectBot(t *testing.T, addr, name string) *Client {
 	t.Helper()
+	// 同じ IP からの続けてのログインで断られたら、やり直す（testserver.Retry）
 	var c *Client
-	var err error
-	for try := 0; try < 3; try++ {
+	err := testserver.Retry(context.Background(), t, func() (err error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
 		c, err = Connect(ctx, Config{Addr: addr, Username: name, ViewDistance: 4})
-		cancel()
-		// Paper は同じアドレスからの接続を 4 秒あけないと断る（connection-throttle）。
-		// 断られた接続も「最後の接続」として数えられるので、4 秒より長く待ってからやり直す
-		if err == nil || !strings.Contains(err.Error(), "throttled") {
-			break
-		}
-		time.Sleep(5 * time.Second)
-	}
+		return err
+	})
 	if err != nil {
 		t.Fatalf("Connect %s: %v", name, err)
 	}

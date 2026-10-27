@@ -22,6 +22,7 @@ import (
 	"github.com/Satoru314/go-mcdriver/internal/chunk"
 	"github.com/Satoru314/go-mcdriver/internal/nbt"
 	"github.com/Satoru314/go-mcdriver/internal/protocol"
+	"github.com/Satoru314/go-mcdriver/internal/testserver"
 	"gonum.org/v1/gonum/spatial/r3"
 )
 
@@ -221,9 +222,14 @@ func rconMust(t *testing.T, rc *check3RCON, cmd string) string {
 
 func connectBot(t *testing.T, addr, name string) *Client {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	c, err := Connect(ctx, Config{Addr: addr, Username: name, ViewDistance: 4})
+	// 同じ IP からの続けてのログインで断られたら、やり直す（testserver.Retry）
+	var c *Client
+	err := testserver.Retry(context.Background(), t, func() (err error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		c, err = Connect(ctx, Config{Addr: addr, Username: name, ViewDistance: 4})
+		return err
+	})
 	if err != nil {
 		t.Fatalf("Connect %s: %v", name, err)
 	}

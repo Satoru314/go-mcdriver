@@ -53,3 +53,13 @@ RCON effect give mcdbot28 minecraft:instant_damage 1 0 → "Applied effect Insta
 リスポーンのあとのダメージ: tp から 600ms で HP 14
 --- PASS: TestSelfIntegration (0.93s)
 ```
+
+## 管理役の判断と対応（2026-10-27）
+
+- internal/testserver が新しくコンテナを作るとき、bukkit.yml（`settings.connection-throttle: -1`）を置く。
+  今動いている mcdriver-testserver は作り直していないので、まだ 4000 のまま（作り直したときに効く。実際の作り直しでは未確認）
+- `testserver.Retry(ctx, t, f)`: エラーが "Connection throttled" を含むときだけ 5 秒待って最大 6 回やり直す。
+  self、stage1、world、check3 の実地テストの Connect をこれで包んだ
+- `-count=3` で TestSelfIntegration を続けて回して 3 回とも通過（2・3 回目は 1 回断られ、やり直して通った）。
+  TestStage1Login も通過。TestWorldIntegration/明るさ と TestCheck3Login（flying で切断）の失敗は、
+  それぞれ既存の記録（2026-10-27-unit4-TestWorldIntegration-light.md、2026-10-27-check3-tp.md）と同じで、この変更の前のコードでも同じように失敗する

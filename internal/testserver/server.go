@@ -111,6 +111,9 @@ func (s *Server) create(ctx context.Context) error {
 	if err := os.WriteFile(filepath.Join(cfg, "server.properties"), []byte(serverProperties), 0o644); err != nil {
 		return err
 	}
+	if err := os.WriteFile(filepath.Join(cfg, "bukkit.yml"), []byte(bukkitYML), 0o644); err != nil {
+		return err
+	}
 	if err := os.WriteFile(filepath.Join(cfg, "eula.txt"), []byte("eula=true\n"), 0o644); err != nil {
 		return err
 	}

@@ -97,9 +97,13 @@ func TestSelfIntegration(t *testing.T) {
 		return out
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	cl, err := Connect(ctx, Config{Addr: ts.GameAddr, Username: name})
-	cancel()
+	var cl *Client
+	err := testserver.Retry(context.Background(), t, func() (err error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		cl, err = Connect(ctx, Config{Addr: ts.GameAddr, Username: name})
+		return err
+	})
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
 	}

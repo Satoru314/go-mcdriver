@@ -93,10 +93,10 @@ type Position struct {
 
 // Position の各成分が表せる範囲。
 const (
-	PositionMinXZ = -1 << 25   // -33554432
-	PositionMaxXZ = 1<<25 - 1  // 33554431
-	PositionMinY  = -1 << 11   // -2048
-	PositionMaxY  = 1<<11 - 1  // 2047
+	PositionMinXZ = -1 << 25  // -33554432
+	PositionMaxXZ = 1<<25 - 1 // 33554431
+	PositionMinY  = -1 << 11  // -2048
+	PositionMaxY  = 1<<11 - 1 // 2047
 )
 
 // Pack は座標を 64 ビットに詰める。範囲の外の成分があれば ErrOutOfRange を返す。

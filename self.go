@@ -79,9 +79,9 @@ type Damage struct {
 	// TypeID は minecraft:damage_type の番号
 	TypeID int
 	// CauseEntityID は原因のエンティティ ID（攻撃したモブなど）。無ければ -1
-	CauseEntityID int
+	CauseEntityID int32
 	// DirectEntityID は直接当たったエンティティ ID（矢など）。無ければ -1
-	DirectEntityID int
+	DirectEntityID int32
 	// SourcePos はダメージの出どころの位置。HasSourcePos が false なら意味がない
 	SourcePos    r3.Vec
 	HasSourcePos bool
@@ -92,7 +92,7 @@ type Damage struct {
 // Self は自分の体の状態の写し。
 type Self struct {
 	// EntityID は自分のエンティティ ID（Login (play) で決まる）
-	EntityID int
+	EntityID int32
 	// Spawned は位置を受け取った（Pos が意味を持つ）か。ログイン直後やリスポーン直後の位置が届く前は false
 	Spawned bool
 	// Pos は足の位置
@@ -214,7 +214,7 @@ func (cl *Client) selfOnLogin(d *protocol.Decoder) error {
 	ss := selfKey.of(cl)
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
-	ss.s.EntityID = int(lp.EntityID)
+	ss.s.EntityID = int32(lp.EntityID)
 	ss.s.GameMode = GameMode(lp.GameMode)
 	ss.s.Dead = false
 	return nil
@@ -277,7 +277,7 @@ func (cl *Client) selfOnCombatKill(d *protocol.Decoder) error {
 	ss := selfKey.of(cl)
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
-	if int(p.PlayerID) != ss.s.EntityID {
+	if int32(p.PlayerID) != ss.s.EntityID {
 		return nil // 自分のことでなければ無視（サーバーは自分にしか送らない）
 	}
 	// Set Health（HP 0）は次のティックに届くので、ここで 0 にしておく（Dead なのに HP が残って見えないように）
@@ -330,15 +330,15 @@ func (cl *Client) selfOnDamage(d *protocol.Decoder) error {
 	}
 	ss := selfKey.of(cl)
 	ss.mu.RLock()
-	mine := int(p.EntityID) == ss.s.EntityID
+	mine := int32(p.EntityID) == ss.s.EntityID
 	ss.mu.RUnlock()
 	if !mine {
 		return nil // ほかのエンティティへのダメージは単位 6・10 で扱う
 	}
 	dmg := Damage{
 		TypeID:         int(p.SourceTypeID),
-		CauseEntityID:  int(p.SourceCauseID),
-		DirectEntityID: int(p.SourceDirectID),
+		CauseEntityID:  int32(p.SourceCauseID),
+		DirectEntityID: int32(p.SourceDirectID),
 		HasSourcePos:   p.HasSourcePos,
 		SourcePos:      r3.Vec{X: p.SourceX, Y: p.SourceY, Z: p.SourceZ},
 		At:             time.Now(),
@@ -392,7 +392,7 @@ func (cl *Client) selfOnMotion(d *protocol.Decoder) error {
 	ss := selfKey.of(cl)
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
-	if int(id) != ss.s.EntityID {
+	if int32(id) != ss.s.EntityID {
 		return nil
 	}
 	ss.s.Vel = r3.Vec{X: float64(v[0]) / 8000, Y: float64(v[1]) / 8000, Z: float64(v[2]) / 8000}

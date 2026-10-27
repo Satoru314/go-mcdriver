@@ -317,11 +317,11 @@ func waitErr(t *testing.T, ch <-chan error) error {
 	}
 }
 
-// expectProbe は確かめるためのクリック（窓の外 -1 を state ID -1 で）を待つ。
+// expectProbe は確かめるためのクリック（PICKUP、button 5、スロット -1、state ID -1）を待つ。
 func (s *fakeServer) expectProbe(win int32) packets.ContainerClick {
 	s.t.Helper()
 	p := s.expectClick()
-	if p.WindowID != win || p.StateID != -1 || p.Slot != -1 || p.Mode != packets.ClickPickup || len(p.Changed) != 0 {
+	if p.WindowID != win || p.StateID != -1 || p.Slot != -1 || p.Button != probeButton || p.Mode != packets.ClickPickup || len(p.Changed) != 0 {
 		s.t.Fatalf("確かめのクリック: %+v", p)
 	}
 	return p

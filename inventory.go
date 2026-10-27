@@ -163,6 +163,9 @@ var (
 	ErrNotPlaying = errors.New("mcdriver: Play の段階でないので送れない")
 )
 
+// probeButton は確かめ用のクリックの button。PICKUP は button 0 / 1 しか処理されないので、何も起きない値にする。
+const probeButton = 5
+
 // clickAnswerTimeout はクリックのあと内容を待つ長さの上限（ctx がもっと短ければそちら）。
 const clickAnswerTimeout = 5 * time.Second
 
@@ -331,8 +334,10 @@ func (cl *Client) Drop(ctx context.Context, slot int, all bool) error {
 // ほかの種類（シフトクリックやドラッグなど）と、結果のスロット（クラフトの結果、かまどの出口など）や
 // バンドルのクリックは予測せず、サーバーの内容が届いたら nil を返す（結果は Inventory や Container で見る）。
 //
-// 確かめ方: クリックのあとに、窓の外（-1）を何もせずにクリックするパケットを、わざと合わない state ID（-1）で送る。
-// サーバーは state ID が合わないと窓の全体（Set Container Content）を送り直すので、それがクリックの結果になる。
+// 確かめ方: クリックのあとに、確かめ用のクリック（mode 0 = PICKUP、button 5、スロット -1）を、わざと合わない
+// state ID（-1）で送る。サーバーは state ID が合わなくてもクリックを実行してから窓の全体（Set Container Content）を
+// 送り直すので、それがクリックの結果になる。公式のサーバーは PICKUP を button 0 / 1 のときしか処理しないので、
+// 確かめ用のクリックは実行されても何も起きない（カーソルに物があっても捨てない。実地テストで確かめた）。
 func (cl *Client) ClickSlot(ctx context.Context, slot, button int, mode ClickMode) error {
 	st := invKey.of(cl)
 	st.clickMu.Lock()
@@ -366,7 +371,7 @@ func (cl *Client) ClickSlot(ctx context.Context, slot, button int, mode ClickMod
 			return fmt.Errorf("mcdriver: 変わるスロットが多すぎる: %d", len(click.Changed))
 		}
 	}
-	probe := packets.ContainerClick{WindowID: winID, StateID: -1, Slot: -1, Button: 0, Mode: packets.ClickPickup, Carried: click.Carried}
+	probe := packets.ContainerClick{WindowID: winID, StateID: -1, Slot: -1, Button: probeButton, Mode: packets.ClickPickup, Carried: click.Carried}
 	seq := st.contentSeq[winID]
 	err := cl.invSend(data.PlayServerboundContainerClick, func(e *protocol.Encoder) error {
 		packets.WriteContainerClick(e, click)

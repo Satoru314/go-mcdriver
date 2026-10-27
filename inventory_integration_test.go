@@ -299,6 +299,39 @@ func TestInventoryIntegration(t *testing.T) {
 		t.Errorf("剣を拾って戻したあとが RCON と合わない")
 	}
 
+	// ---- カーソルに物を持ったままのクリック: 確かめ用のクリックで物が捨てられない ----
+	itemsNear := func() bool {
+		t.Helper()
+		return strings.Contains(cmd(fmt.Sprintf("execute if entity @e[type=item,x=%d,y=%d,z=%d,distance=..16]", x, testserver.StandY, z)), "passed")
+	}
+	stoneBefore := count("minecraft:stone")
+	if inv := cl.Inventory(); !inv.Slots[33].Empty() || !inv.Slots[34].Empty() {
+		t.Fatalf("スロット 33, 34 が空でない: %s", describeInv(inv))
+	}
+	click(35, 0, ClickPickup) // 石 62 個をカーソルに
+	click(34, 1, ClickPickup) // 1 個だけ 34 に置く（カーソルに 61 個残る）
+	click(33, 1, ClickPickup) // もう 1 個 33 に（カーソルに 60 個残る）
+	inv = cl.Inventory()
+	if inv.Cursor.Name() != "stone" || inv.Cursor.Count != 60 {
+		t.Errorf("カーソルの石 %v、期待 stone×60", inv.Cursor)
+	}
+	if itemsNear() {
+		t.Errorf("カーソルに物があるときのクリックで、地面にアイテムが出た（確かめ用のクリックで捨てられた）")
+	}
+	if n := count("minecraft:stone"); n != stoneBefore {
+		t.Errorf("カーソルに物があるあいだの石の数（RCON、カーソルを含む）%d、期待 %d", n, stoneBefore)
+	}
+	if !has(34, "minecraft:stone[count=1]") || !has(33, "minecraft:stone[count=1]") {
+		t.Errorf("右クリックで置いた石が RCON で見えない")
+	}
+	click(35, 0, ClickPickup) // 残りを 35 に戻す
+	if inv := cl.Inventory(); !inv.Cursor.Empty() || inv.Slots[35].Count != 60 {
+		t.Errorf("戻したあと: %s", describeInv(inv))
+	}
+	if itemsNear() || count("minecraft:stone") != stoneBefore {
+		t.Errorf("戻したあと、地面にアイテムがあるか石の数が変わった")
+	}
+
 	// ---- 受け入れられないクリック: 石を頭の防具のスロットに置こうとする → ErrClickRejected ----
 	click(SlotHotbar, 0, ClickPickup) // 石 2 個を拾う
 	err = cl.ClickSlot(ctx, SlotHead, 0, ClickPickup)
@@ -348,4 +381,5 @@ func TestInventoryIntegration(t *testing.T) {
 		t.Errorf("読めなかったパケット %d（最後 %v）", n, last)
 	}
 	t.Logf("最後の持ち物: %s", describeInv(cl.Inventory()))
+	t.Logf("サーバーのログ（最後の 15 行。確かめ用のクリックの警告が無いかを見る）:\n%s", testserver.Logs(context.Background(), 15))
 }

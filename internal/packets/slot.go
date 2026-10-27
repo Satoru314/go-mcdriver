@@ -8,6 +8,7 @@ package packets
 // intangible_projectile）は、サーバーが NBT で送るので NBT として読み飛ばす。
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 
@@ -16,14 +17,39 @@ import (
 	"github.com/Satoru314/go-mcdriver/internal/protocol"
 )
 
-// Slot はアイテムの入れ物 1 つ分。Count が 0 なら空（Item は 0）。部品情報は読み飛ばしてある。
+// Slot はアイテムの入れ物 1 つ分。Count が 0 なら空（Item は 0）。
+// 部品情報は中身を読まずに読み飛ばすが、ReadSlot は読み飛ばした部分のバイト列を Components に残す
+// （持ち物のクリックの予測で、サーバーへ同じものを送り返すため。単位 8）。
 type Slot struct {
 	Count int32
 	Item  data.ItemID
+	// Components は部品情報の差分（足す数・消す数から最後まで）のバイト列。差分が無ければ nil。
+	// NBT の部分は読み直して書いたもの（コンパウンドの名前は辞書順）なので、サーバーが送ったバイト列と
+	// 順番が違うことはあるが、中身は同じ
+	Components []byte
 }
 
 // Empty は空なら true。
 func (s Slot) Empty() bool { return s.Count <= 0 }
+
+// HasComponents は部品情報の差分を持つかを返す。
+func (s Slot) HasComponents() bool { return len(s.Components) > 0 }
+
+// SameItem はアイテムの種類と部品情報が同じ（重ねられる）かを返す。個数は比べない。空どうしは同じ。
+func (s Slot) SameItem(o Slot) bool {
+	if s.Empty() || o.Empty() {
+		return s.Empty() == o.Empty()
+	}
+	return s.Item == o.Item && bytes.Equal(s.Components, o.Components)
+}
+
+// Equal は個数まで含めて同じかを返す。空どうしは同じ。
+func (s Slot) Equal(o Slot) bool {
+	if s.Empty() || o.Empty() {
+		return s.Empty() == o.Empty()
+	}
+	return s.Count == o.Count && s.SameItem(o)
+}
 
 // ErrUnsupportedData は、読み飛ばし方を知らない形のデータ（知らない部品の種類、
 // registry に無い中身をその場で送る形など）に出会ったときのエラー。
@@ -33,11 +59,18 @@ var ErrUnsupportedData = errors.New("packets: 読み飛ばし方を知らない�
 // maxSlotDepth は入れ物の中の入れ物（シュルカーボックスの中身など）をたどる深さの上限。
 const maxSlotDepth = 16
 
-// ReadSlot はスロット（空でもよい形）を 1 つ読む。部品情報は読み飛ばす。
+// ReadSlot はスロット（空でもよい形）を 1 つ読む。部品情報は読み飛ばし、そのバイト列を Components に残す。
 func ReadSlot(d *protocol.Decoder) (Slot, error) {
-	s := skipper{d: d}
+	s := skipper{d: d, capture: true}
 	slot := s.slot()
 	return slot, s.err
+}
+
+// SkipSlot はスロットを読み飛ばす（Components も作らない）。
+func SkipSlot(d *protocol.Decoder) error {
+	s := skipper{d: d}
+	s.slot()
+	return s.err
 }
 
 // SkipComponents は部品情報の差分（DataComponentPatch: 足す数、消す数、足す部品の中身、消す部品の種類）を読み飛ばす。
@@ -47,7 +80,7 @@ func SkipComponents(d *protocol.Decoder) error {
 	return s.err
 }
 
-// WriteSlot はスロットを部品情報なしで書く（テストの偽のサーバー用）。
+// WriteSlot はスロットを書く。部品情報は Components をそのまま書く（無ければ差分なし）。
 func WriteSlot(e *protocol.Encoder, s Slot) {
 	if s.Empty() {
 		e.WriteVarInt(0)
@@ -55,17 +88,38 @@ func WriteSlot(e *protocol.Encoder, s Slot) {
 	}
 	e.WriteVarInt(s.Count)
 	e.WriteVarInt(int32(s.Item))
+	if len(s.Components) > 0 {
+		e.WriteBytes(s.Components)
+		return
+	}
 	e.WriteVarInt(0) // 足す部品の数
 	e.WriteVarInt(0) // 消す部品の数
+}
+
+// ReadSlots は数（VarInt）つきのスロットの並びを読む（Set Container Content など）。
+func ReadSlots(d *protocol.Decoder, max int) ([]Slot, error) {
+	return protocol.ReadPrefixedArray(d, max, ReadSlot)
+}
+
+// WriteSlots は数（VarInt）つきのスロットの並びを書く。
+func WriteSlots(e *protocol.Encoder, slots []Slot) {
+	e.WriteVarInt(int32(len(slots)))
+	for _, s := range slots {
+		WriteSlot(e, s)
+	}
 }
 
 // ---- 読み飛ばしの道具 ----
 
 // skipper は読み飛ばしを続けて書くための道具。一度エラーになったら、あとは何もしない。
+// out が nil でなければ、読んだものを同じ形で out に書き写す（スロットの部品情報を残すため）。
 type skipper struct {
 	d     *protocol.Decoder
 	err   error
 	depth int
+
+	capture bool              // いちばん外のスロットの部品情報を Slot.Components に残すか
+	out     *protocol.Encoder // 書き写す先（部品情報を読むあいだだけ）
 }
 
 func (s *skipper) fail(err error) {
@@ -80,6 +134,9 @@ func (s *skipper) varint() int32 {
 	}
 	v, err := s.d.ReadVarInt()
 	s.fail(err)
+	if err == nil && s.out != nil {
+		s.out.WriteVarInt(v)
+	}
 	return v
 }
 
@@ -87,15 +144,26 @@ func (s *skipper) varlong() {
 	if s.err != nil {
 		return
 	}
-	_, err := s.d.ReadVarLong()
+	v, err := s.d.ReadVarLong()
 	s.fail(err)
+	if err == nil && s.out != nil {
+		s.out.WriteVarLong(v)
+	}
 }
 
 func (s *skipper) bytes(n int) {
 	if s.err != nil {
 		return
 	}
-	s.fail(s.d.Skip(n))
+	if s.out == nil {
+		s.fail(s.d.Skip(n))
+		return
+	}
+	b, err := s.d.ReadBytes(n)
+	s.fail(err)
+	if err == nil {
+		s.out.WriteBytes(b)
+	}
 }
 
 func (s *skipper) boolean() bool {
@@ -104,6 +172,9 @@ func (s *skipper) boolean() bool {
 	}
 	v, err := s.d.ReadBool()
 	s.fail(err)
+	if err == nil && s.out != nil {
+		s.out.WriteBool(v)
+	}
 	return v
 }
 
@@ -111,8 +182,12 @@ func (s *skipper) str(max int) {
 	if s.err != nil {
 		return
 	}
-	_, err := s.d.ReadString(max)
+	v, err := s.d.ReadString(max)
 	s.fail(err)
+	if err == nil && s.out != nil {
+		s.out.WriteVarInt(int32(len(v)))
+		s.out.WriteBytes([]byte(v))
+	}
 }
 
 func (s *skipper) ident() { s.str(32767) }
@@ -121,7 +196,15 @@ func (s *skipper) nbt() {
 	if s.err != nil {
 		return
 	}
-	s.fail(nbt.SkipNetwork(s.d))
+	if s.out == nil {
+		s.fail(nbt.SkipNetwork(s.d))
+		return
+	}
+	v, err := nbt.ReadNetwork(s.d)
+	s.fail(err)
+	if err == nil {
+		s.fail(nbt.WriteNetwork(s.out, v))
+	}
 }
 
 // count は並びの長さを読む。残りのバイト数より多ければ壊れたデータとする（1 つは 1 バイト以上なので）。
@@ -296,10 +379,23 @@ func (s *skipper) slot() Slot {
 		s.fail(errors.New("packets: アイテムの入れ子が深すぎる"))
 		return Slot{}
 	}
+	slot := Slot{Count: n, Item: data.ItemID(id)}
+	// いちばん外のスロットで残すときは、部品情報の部分だけを別の Encoder に書き写す
+	var buf *protocol.Encoder
+	if s.capture && s.out == nil {
+		buf = protocol.NewEncoder()
+		s.out = buf
+	}
 	s.depth++
 	s.components()
 	s.depth--
-	return Slot{Count: n, Item: data.ItemID(id)}
+	if buf != nil {
+		s.out = nil
+		if b := buf.Bytes(); s.err == nil && !(len(b) == 2 && b[0] == 0 && b[1] == 0) {
+			slot.Components = append([]byte(nil), b...)
+		}
+	}
+	return slot
 }
 
 // components は DataComponentPatch を読み飛ばす。

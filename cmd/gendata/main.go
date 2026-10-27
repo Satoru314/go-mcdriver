@@ -5,6 +5,9 @@
 //	go run ./cmd/gendata                 # jar の取得（sha1 確認）→ データ出力 → 生成
 //	go run ./cmd/gendata -skip-run       # 書き出し済みの .gendata/generated から生成だけ行う
 //
+// 公式データに無い情報（硬さ、当たり判定の形、光、エンティティの大きさなど）は、
+// PrismarineJS の minecraft-data の固定したコミットから取り、公式データと突き合わせる（mcdata.go）。
+//
 // 作業フォルダ（既定 .gendata）は .gitignore 済み。
 package main
 
@@ -45,5 +48,12 @@ func run(version, workDir, outDir, java string, skipRun bool) error {
 			return err
 		}
 	}
-	return generate(version, filepath.Join(workDir, "generated"), outDir, jar)
+	if version != mcdataVersion {
+		return fmt.Errorf("minecraft-data のファイルは %s に固定している（指定は %s）", mcdataVersion, version)
+	}
+	// minecraft-data は -skip-run でも取得する（取得済みで sha256 が合えば何もしない）
+	if err := fetchMCData(workDir); err != nil {
+		return err
+	}
+	return generate(version, workDir, outDir, jar)
 }

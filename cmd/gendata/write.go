@@ -14,9 +14,11 @@ func writeVersion(w *bytes.Buffer, v versionJSON) {
 	fmt.Fprintf(w, "// Version は生成元のサーバーのバージョン。\nconst Version = %q\n\n", v.ID)
 	fmt.Fprintf(w, "// ProtocolVersion はハンドシェイクで送るプロトコル番号（jar の version.json より）。\nconst ProtocolVersion = %d\n\n", v.ProtocolVersion)
 	fmt.Fprintf(w, "// WorldVersion はワールドのデータのバージョン（jar の version.json より）。\nconst WorldVersion = %d\n", v.WorldVersion)
+	fmt.Fprintf(w, "\n// MinecraftDataTag と MinecraftDataCommit は、公式データに無い情報を取った PrismarineJS/minecraft-data のタグとコミット。\n")
+	fmt.Fprintf(w, "const (\nMinecraftDataTag = %q\nMinecraftDataCommit = %q\n)\n", mcdataTag, mcdataCommit)
 }
 
-func writeBlocks(w *bytes.Buffer, blocks []block) {
+func writeBlocks(w *bytes.Buffer, blocks []block, md *mcdata) {
 	total := 0
 	for _, b := range blocks {
 		total += b.NumStates
@@ -33,7 +35,56 @@ func writeBlocks(w *bytes.Buffer, blocks []block) {
 			}
 			w.WriteString("}")
 		}
+		// ここから minecraft-data の情報
+		ex := md.Blocks[b.ID]
+		fmt.Fprintf(w, ", Hardness: %s, BlastResistance: %s", flt(ex.Hardness), flt(ex.Resistance))
+		if ex.Diggable {
+			w.WriteString(", Diggable: true")
+		}
+		if ex.HarvestTools != nil {
+			fmt.Fprintf(w, ", HarvestTools: []ItemID{%s}", intList(ex.HarvestTools))
+		}
+		if ex.EmitLight != 0 {
+			fmt.Fprintf(w, ", EmitLight: %d", ex.EmitLight)
+		}
+		if ex.FilterLight != 0 {
+			fmt.Fprintf(w, ", FilterLight: %d", ex.FilterLight)
+		}
+		if ex.Transparent {
+			w.WriteString(", Transparent: true")
+		}
 		w.WriteString("},\n")
+	}
+	w.WriteString("}\n")
+}
+
+// writeShapes は当たり判定の形の一覧と、状態 ID ごとの形の番号を書く。
+func writeShapes(w *bytes.Buffer, md *mcdata) {
+	w.WriteString("import \"gonum.org/v1/gonum/spatial/r3\"\n\n")
+	w.WriteString("// collisionShapes は当たり判定の形の一覧（minecraft-data の形の番号の順）。座標はブロックの中の 0〜1。\n")
+	w.WriteString("var collisionShapes = [][]r3.Box{\n")
+	for i, sh := range md.Shapes {
+		fmt.Fprintf(w, "/* %d */ {", i)
+		for _, b := range sh {
+			fmt.Fprintf(w, "bx(%s, %s, %s, %s, %s, %s), ", f64(b[0]), f64(b[1]), f64(b[2]), f64(b[3]), f64(b[4]), f64(b[5]))
+		}
+		w.WriteString("},\n")
+	}
+	w.WriteString("}\n\n")
+	w.WriteString("// stateCollisionShape は状態 ID ごとの collisionShapes の番号。\n")
+	w.WriteString("var stateCollisionShape = [NumBlockStates]uint16{\n")
+	for i := 0; i < len(md.StateShape); i += 32 {
+		end := min(i+32, len(md.StateShape))
+		w.WriteString(intList(md.StateShape[i:end]) + ",\n")
+	}
+	w.WriteString("}\n")
+}
+
+// writeEntities はエンティティの種類（entity_type の registry の順）と大きさを書く。
+func writeEntities(w *bytes.Buffer, md *mcdata) {
+	w.WriteString("var entityTypes = []EntityType{\n")
+	for _, e := range md.Entities {
+		fmt.Fprintf(w, "{ID: %d, Name: %q, Width: %s, Height: %s},\n", e.ID, e.Name, flt(e.Width), flt(e.Height))
 	}
 	w.WriteString("}\n")
 }
@@ -222,6 +273,11 @@ func intList(ns []int) string {
 // flt は float32 として表せる最短の表記にする（公式データの float は Java の float）。
 func flt(f float64) string {
 	return strconv.FormatFloat(float64(float32(f)), 'g', -1, 32)
+}
+
+// f64 は float64 の最短の表記にする（当たり判定の箱の座標は Java の double）。
+func f64(f float64) string {
+	return strconv.FormatFloat(f, 'g', -1, 64)
 }
 
 // camel は "level_chunk_with_light" を "LevelChunkWithLight" にする。

@@ -25,7 +25,8 @@ func TestSelfFromFakeServer(t *testing.T) {
 	// 位置の強制修正（速度つき）
 	s.teleport(packets.PlayerPosition{TeleportID: 1, X: 10.5, Y: -60, Z: -3.25, VelX: 0.1, VelY: 0.2, VelZ: 0.3, Yaw: 45, Pitch: 30}, 10.5, -60, -3.25, true)
 	st = c.Self()
-	if !st.Spawned || st.Pos != (r3.Vec{X: 10.5, Y: -60, Z: -3.25}) || st.Yaw != 45 || st.Pitch != 30 || !st.OnGround {
+	if !st.Spawned || st.Pos != (r3.Vec{X: 10.5, Y: -60, Z: -3.25}) || st.Yaw != 45 || st.Pitch != 30 || st.OnGround {
+		// チャンクが無いので物理は進まず、接地は偽のまま（単位 7 から接地は物理が決める）
 		t.Errorf("位置 %+v", st)
 	}
 	if st.Vel != (r3.Vec{X: 0.1, Y: 0.2, Z: 0.3}) {

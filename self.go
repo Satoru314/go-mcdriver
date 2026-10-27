@@ -97,8 +97,8 @@ type Self struct {
 	Spawned bool
 	// Pos は足の位置
 	Pos r3.Vec
-	// Vel は速度（ブロック/ティック）。サーバーから届いた値（Set Entity Motion、位置の強制修正）。
-	// 物理（単位 7）ができるまでは、届いた値をそのまま持つだけ
+	// Vel は速度（ブロック/ティック。本家の deltaMovement）。物理（controls.go）が毎ティック計算する値で、
+	// 位置の強制修正と Set Entity Motion（ノックバックなど）で届いた値もそこに当てはめる
 	Vel r3.Vec
 	// Yaw, Pitch は向き（度）。Yaw は 0 が南（+z）で時計回り、Pitch は下向きが正（-90〜90）
 	Yaw, Pitch float32
@@ -152,8 +152,6 @@ func init() {
 	onPlay(data.PlayClientboundGameEvent, (*Client).selfOnGameEvent)
 	onPlay(data.PlayClientboundPlayerAbilities, (*Client).selfOnAbilities)
 	onPlay(data.PlayClientboundDamageEvent, (*Client).selfOnDamage)
-	onPlay(data.PlayClientboundPlayerPosition, (*Client).selfOnPosition)
-	onPlay(data.PlayClientboundSetEntityMotion, (*Client).selfOnMotion)
 }
 
 // ---- 公開 API ----
@@ -163,13 +161,14 @@ func (cl *Client) Self() Self {
 	cl.mu.Lock()
 	pos := r3.Vec{X: cl.x, Y: cl.y, Z: cl.z}
 	yaw, pitch, onGround, spawned := cl.yaw, cl.pitch, cl.onGround, cl.hasPos
+	vel := cl.velocityLocked()
 	cl.mu.Unlock()
 
 	ss := selfKey.of(cl)
 	ss.mu.RLock()
 	s := ss.s
 	ss.mu.RUnlock()
-	s.Pos, s.Yaw, s.Pitch, s.OnGround, s.Spawned = pos, yaw, pitch, onGround, spawned
+	s.Pos, s.Yaw, s.Pitch, s.OnGround, s.Spawned, s.Vel = pos, yaw, pitch, onGround, spawned, vel
 	return s
 }
 
@@ -238,7 +237,6 @@ func (cl *Client) selfOnRespawn(d *protocol.Decoder) error {
 	defer ss.mu.Unlock()
 	ss.s.GameMode = GameMode(rp.GameMode)
 	ss.s.Dead = false
-	ss.s.Vel = r3.Vec{}
 	return nil
 }
 
@@ -349,52 +347,5 @@ func (cl *Client) selfOnDamage(d *protocol.Decoder) error {
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
 	ss.s.LastDamage, ss.s.HasDamage = dmg, true
-	return nil
-}
-
-// selfOnPosition は位置の強制修正の速度を当てはめる（位置と向きは client.go が当てはめる）。
-// RotateVelocity（向きの変化に合わせて速度を回す）は扱わない（物理の単位 7 で扱う）。
-func (cl *Client) selfOnPosition(d *protocol.Decoder) error {
-	pp, err := packets.ReadPlayerPosition(d)
-	if err != nil {
-		return fmt.Errorf("mcdriver: Synchronize Player Position: %w", err)
-	}
-	ss := selfKey.of(cl)
-	ss.mu.Lock()
-	defer ss.mu.Unlock()
-	v := r3.Vec{X: pp.VelX, Y: pp.VelY, Z: pp.VelZ}
-	if pp.Flags&packets.RelVelX != 0 {
-		v.X += ss.s.Vel.X
-	}
-	if pp.Flags&packets.RelVelY != 0 {
-		v.Y += ss.s.Vel.Y
-	}
-	if pp.Flags&packets.RelVelZ != 0 {
-		v.Z += ss.s.Vel.Z
-	}
-	ss.s.Vel = v
-	return nil
-}
-
-// selfOnMotion は Set Entity Motion が自分のものなら速度にする（ノックバックなど）。
-// 中身: エンティティ ID（VarInt）、速度 x, y, z（Short、1/8000 ブロック/ティック）。
-func (cl *Client) selfOnMotion(d *protocol.Decoder) error {
-	id, err := d.ReadVarInt()
-	if err != nil {
-		return fmt.Errorf("mcdriver: Set Entity Motion: %w", err)
-	}
-	var v [3]int16
-	for i := range v {
-		if v[i], err = d.ReadShort(); err != nil {
-			return fmt.Errorf("mcdriver: Set Entity Motion: %w", err)
-		}
-	}
-	ss := selfKey.of(cl)
-	ss.mu.Lock()
-	defer ss.mu.Unlock()
-	if int32(id) != ss.s.EntityID {
-		return nil
-	}
-	ss.s.Vel = r3.Vec{X: float64(v[0]) / 8000, Y: float64(v[1]) / 8000, Z: float64(v[2]) / 8000}
 	return nil
 }

@@ -442,12 +442,14 @@ func (cl *Client) worldOnBlockUpdate(d *protocol.Decoder) error {
 	if ws.w == nil {
 		return nil
 	}
+	old, _ := ws.w.Block(int(pos.X), int(pos.Y), int(pos.Z)) // 出来事の知らせ用（読めなければ SetBlock も失敗する）
 	if err := ws.w.SetBlock(int(pos.X), int(pos.Y), int(pos.Z), id); err != nil {
 		if ignorable(err) {
 			return nil
 		}
 		return fmt.Errorf("mcdriver: Block Update %v: %w", pos, err)
 	}
+	cl.emitBlockChange(BlockPos{X: int(pos.X), Y: int(pos.Y), Z: int(pos.Z)}, old, id)
 	ws.markStaleAround(chunk.SectionPos{X: int(pos.X) >> 4, Y: int(pos.Y) >> 4, Z: int(pos.Z) >> 4})
 	return nil
 }
@@ -463,11 +465,19 @@ func (cl *Client) worldOnSectionUpdate(d *protocol.Decoder) error {
 	if ws.w == nil {
 		return nil
 	}
+	// 出来事の知らせ用に、変わる前の状態を読んでおく
+	olds := make([]int32, len(changes))
+	for i, ch := range changes {
+		olds[i], _ = ws.w.Block(sp.X*16+ch.X, sp.Y*16+ch.Y, sp.Z*16+ch.Z)
+	}
 	if err := ws.w.ApplySectionUpdate(sp, changes); err != nil {
 		if ignorable(err) {
 			return nil
 		}
 		return fmt.Errorf("mcdriver: Update Section Blocks %+v: %w", sp, err)
+	}
+	for i, ch := range changes {
+		cl.emitBlockChange(BlockPos{X: sp.X*16 + ch.X, Y: sp.Y*16 + ch.Y, Z: sp.Z*16 + ch.Z}, olds[i], ch.State)
 	}
 	ws.markStaleAround(sp)
 	return nil

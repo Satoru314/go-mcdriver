@@ -1,0 +1,101 @@
+# go-mcdriver のテスト。push と pull request で動く。
+#
+# - unit: go vet、gofmt、部品ごとのテスト（go test -race ./...）。公式データの全件照合のため、
+#   先に go run ./cmd/gendata で公式データを書き出し、生成したコード（data/*_gen.go）がコミットされたものと同じかも確かめる
+# - integration: 実地テスト。internal/testserver が Docker でテスト用の Paper 1.21.4 を立て、
+#   go test -tags integration ./... を回す
+#
+# 長時間運転のテスト（-tags soak）は時間がかかるので、ここでは型の確かめ（go vet）だけ行い、手元で回す。
+name: test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # gendata の作業フォルダ（Mojang の jar、minecraft-data、書き出したデータ）
+      - name: gendata のキャッシュ
+        uses: actions/cache@v4
+        with:
+          path: .gendata
+          key: gendata-${{ runner.os }}-${{ hashFiles('cmd/gendata/**') }}
+          restore-keys: gendata-${{ runner.os }}-
+
+      - name: gofmt
+        run: |
+          out="$(gofmt -l .)"
+          if [ -n "$out" ]; then
+            echo "gofmt が必要なファイル:"
+            echo "$out"
+            exit 1
+          fi
+
+      - name: go vet
+        run: |
+          go vet ./...
+          go vet -tags integration ./...
+          go vet -tags soak ./...
+
+      - name: 公式データを書き出す（go run ./cmd/gendata）
+        run: go run ./cmd/gendata
+
+      - name: 生成したコードがコミットされたものと同じか
+        run: git diff --exit-code -- data/
+
+      - name: 部品ごとのテスト
+        run: go test -race -count=1 ./...
+
+  integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # 最初の起動は Paper の準備（Mojang の jar の取得と変換）で数分かかる
+      MCDRIVER_TESTSERVER_WAIT: 10m
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gendata のキャッシュ
+        uses: actions/cache@v4
+        with:
+          path: .gendata
+          key: gendata-${{ runner.os }}-${{ hashFiles('cmd/gendata/**') }}
+          restore-keys: gendata-${{ runner.os }}-
+
+      # テスト用サーバーの Paper の jar（~/.cache/go-mcdriver）。区画の番号の記録や鍵は残さない
+      - name: Paper の jar のキャッシュ
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/go-mcdriver/paper-*.jar
+          key: paper-jar-${{ hashFiles('internal/testserver/config.go') }}
+
+      - name: Docker のイメージを先に取る
+        run: docker pull eclipse-temurin:21-jre
+
+      - name: 公式データを書き出す（go run ./cmd/gendata）
+        run: go run ./cmd/gendata
+
+      - name: 実地テスト
+        run: go test -tags integration -count=1 -timeout 25m ./...
+
+      - name: テスト用サーバーのログ（失敗したとき）
+        if: failure()
+        run: docker logs --tail 200 mcdriver-testserver || true

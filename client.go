@@ -56,6 +56,8 @@ type Config struct {
 	ViewDistance int
 	// Locale は言語（例 "ja_jp"）。空なら "en_us"
 	Locale string
+	// EventBuffer は Events() のチャネルにためる数。0 なら DefaultEventBuffer（256）。あふれたら古いものを捨てる
+	EventBuffer int
 }
 
 // Client はサーバーに繋がった 1 人の bot。
@@ -216,6 +218,7 @@ func (cl *Client) shutdown(err error) {
 		cl.errMu.Unlock()
 		cl.c.Close()
 		close(cl.done)
+		cl.emitDisconnect(err) // 最後の出来事を入れて Events() のチャネルを閉じる（events.go）
 	})
 }
 

@@ -309,6 +309,9 @@ func (cl *Client) CloseContainer() error {
 	}); err != nil {
 		return err
 	}
+	if st.win != nil {
+		cl.emit(ContainerCloseEvent{eventBase: evNow(), WindowID: id}) // events.go
+	}
 	st.win = nil
 	return nil
 }
@@ -487,6 +490,7 @@ func (cl *Client) invOnOpenScreen(d *protocol.Decoder) error {
 		name = r.Entries[p.Type]
 	}
 	st.win = &windowState{id: p.WindowID, typeName: name, title: conn.TextPlain(p.Title), playerStart: -2, props: map[int]int{}}
+	cl.emit(ContainerOpenEvent{eventBase: evNow(), WindowID: p.WindowID, Type: name, Title: st.win.title}) // events.go
 	return nil
 }
 
@@ -500,6 +504,7 @@ func (cl *Client) invOnHorseScreen(d *protocol.Decoder) error {
 		return nil
 	}
 	st.win = &windowState{id: id, typeName: "horse", playerStart: -2, props: map[int]int{}}
+	cl.emit(ContainerOpenEvent{eventBase: evNow(), WindowID: id, Type: "horse"}) // events.go
 	return nil
 }
 
@@ -609,6 +614,9 @@ func (cl *Client) invOnClose(d *protocol.Decoder) error {
 		return nil
 	}
 	// 公式のクライアントは番号を見ずに閉じる
+	if st.win != nil {
+		cl.emit(ContainerCloseEvent{eventBase: evNow(), WindowID: st.win.id, ByServer: true}) // events.go
+	}
 	st.win = nil
 	_ = id
 	return nil

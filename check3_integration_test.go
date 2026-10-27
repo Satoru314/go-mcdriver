@@ -13,7 +13,6 @@ package mcdriver
 import (
 	"bufio"
 	"context"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -28,6 +27,7 @@ import (
 
 	"github.com/Satoru314/go-mcdriver/data"
 	"github.com/Satoru314/go-mcdriver/internal/protocol"
+	"github.com/Satoru314/go-mcdriver/internal/rcon"
 )
 
 func TestCheck3Login(t *testing.T) {
@@ -145,70 +145,26 @@ func check3Env(t *testing.T, key string) string {
 	return v
 }
 
-// ---- RCON（確認用の最小限のクライアント） ----
+// ---- RCON（internal/rcon を使う） ----
 
-type check3RCON struct {
-	c  net.Conn
-	r  *bufio.Reader
-	id int32
-}
+type check3RCON struct{ c *rcon.Client }
 
 func check3DialRCON(addr, pass string) (*check3RCON, error) {
-	c, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	c, err := rcon.Dial(ctx, addr, pass)
 	if err != nil {
 		return nil, err
 	}
-	rc := &check3RCON{c: c, r: bufio.NewReader(c)}
-	id, _, err := rc.roundTrip(3, pass)
-	if err != nil {
-		c.Close()
-		return nil, err
-	}
-	if id == -1 {
-		c.Close()
-		return nil, errors.New("RCON の認証に失敗")
-	}
-	return rc, nil
+	return &check3RCON{c: c}, nil
 }
 
 func (rc *check3RCON) close() { rc.c.Close() }
 
 func (rc *check3RCON) command(cmd string) (string, error) {
-	_, body, err := rc.roundTrip(2, cmd)
-	return body, err
-}
-
-// roundTrip は 1 つ送って 1 つ受け取る（今回のコマンドは応答が 1 つに収まる）。
-func (rc *check3RCON) roundTrip(typ int32, body string) (int32, string, error) {
-	rc.id++
-	rc.c.SetDeadline(time.Now().Add(10 * time.Second))
-	b := make([]byte, 12, 14+len(body))
-	binary.LittleEndian.PutUint32(b[0:], uint32(10+len(body)))
-	binary.LittleEndian.PutUint32(b[4:], uint32(rc.id))
-	binary.LittleEndian.PutUint32(b[8:], uint32(typ))
-	b = append(b, body...)
-	b = append(b, 0, 0)
-	if _, err := rc.c.Write(b); err != nil {
-		return 0, "", err
-	}
-	for {
-		var hdr [12]byte
-		if _, err := io.ReadFull(rc.r, hdr[:]); err != nil {
-			return 0, "", err
-		}
-		n := int(binary.LittleEndian.Uint32(hdr[0:]))
-		id := int32(binary.LittleEndian.Uint32(hdr[4:]))
-		rtyp := int32(binary.LittleEndian.Uint32(hdr[8:]))
-		rest := make([]byte, n-8)
-		if _, err := io.ReadFull(rc.r, rest); err != nil {
-			return 0, "", err
-		}
-		// 認証のときは、先に空の RESPONSE_VALUE が来ることがあるので飛ばす
-		if typ == 3 && rtyp != 2 {
-			continue
-		}
-		return id, string(rest[:len(rest)-2]), nil
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return rc.c.Command(ctx, cmd)
 }
 
 // ---- パケットを数える中継 ----

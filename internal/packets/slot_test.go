@@ -366,7 +366,7 @@ func TestReadSlotEmptyAndErrors(t *testing.T) {
 	if s, err := ReadSlot(d); err != nil || !s.Empty() {
 		t.Errorf("空: %+v %v", s, err)
 	}
-	if s, err := ReadSlot(d); err != nil || s != (Slot{Count: 5, Item: 7}) {
+	if s, err := ReadSlot(d); err != nil || !s.Equal(Slot{Count: 5, Item: 7}) || s.Components != nil {
 		t.Errorf("部品なし: %+v %v", s, err)
 	}
 

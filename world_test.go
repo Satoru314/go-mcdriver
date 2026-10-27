@@ -104,6 +104,8 @@ type testColumn struct {
 	block func(x, y, z int) int32
 	// sky と blk は明るさを返す（ワールドの座標。nil なら送らない）
 	sky, blk func(x, y, z int) int
+	// lightSec は明るさを送るセクション（明るさのセクションの番号）を選ぶ。nil なら全部
+	lightSec func(i int) bool
 }
 
 func (c testColumn) encode(t *testing.T, e *protocol.Encoder) {
@@ -132,11 +134,11 @@ func (c testColumn) encode(t *testing.T, e *protocol.Encoder) {
 	}
 	e.WritePrefixedBytes(sec.Bytes())
 	e.WriteVarInt(0) // ブロックエンティティなし
-	encodeLight(e, c.minY, c.height, c.cx, c.cz, c.sky, c.blk)
+	encodeLight(e, c.minY, c.height, c.cx, c.cz, c.sky, c.blk, c.lightSec)
 }
 
 // encodeLight は明るさの部分を書く。f が nil の種類は何も送らない（マスクがすべて 0）。
-func encodeLight(e *protocol.Encoder, minY, height int, cx, cz int32, sky, blk func(x, y, z int) int) {
+func encodeLight(e *protocol.Encoder, minY, height int, cx, cz int32, sky, blk func(x, y, z int) int, sel func(i int) bool) {
 	n := height/16 + 2
 	layer := func(f func(x, y, z int) int) (protocol.BitSet, [][]byte) {
 		var m protocol.BitSet
@@ -145,6 +147,9 @@ func encodeLight(e *protocol.Encoder, minY, height int, cx, cz int32, sky, blk f
 			return m, nil
 		}
 		for i := range n {
+			if sel != nil && !sel(i) {
+				continue
+			}
 			m.Set(i)
 			baseY := minY + (i-1)*16
 			arrs = append(arrs, lightOf(func(x, y, z int) int { return f(int(cx)*16+x, baseY+y, int(cz)*16+z) }))
@@ -301,8 +306,36 @@ func TestWorldFromFakeServer(t *testing.T) {
 	if b, sk, ok := c.Light(BlockPos{1, -64, 1}); !ok || b != 2 || sk != 0 {
 		t.Errorf("Light(1,-64,1) = %d %d %v、期待 2 0", b, sk, ok)
 	}
-	if _, _, ok := c.Light(BlockPos{-1, 0, 0}); ok {
-		t.Error("明るさを送っていないチャンクで Light が ok")
+	// 明るさを 1 つも送っていないチャンク: 公式のクライアントと同じく block 0、sky 15
+	if b, sk, ok := c.Light(BlockPos{-1, 0, 0}); !ok || b != 0 || sk != 15 {
+		t.Errorf("明るさの無いチャンクの Light = %d %d %v、期待 0 15", b, sk, ok)
+	}
+	// 一部のセクション（明るさのセクション 10 と 12、y=80〜95 と 112〜127）だけ空の明るさを送ったチャンク (1, 0)
+	skyF := func(x, y, z int) int { return (x + z + y/16) % 16 }
+	colL := testColumn{cx: 1, cz: 0, minY: -64, height: 384,
+		block:    func(x, y, z int) int32 { return int32(air) },
+		sky:      skyF,
+		lightSec: func(i int) bool { return i == 10 || i == 12 },
+	}
+	s.sendChunks(colL)
+	for _, q := range []struct {
+		y, want int
+	}{
+		{85, skyF(17, 85, 5)},   // データのあるセクション
+		{0, skyF(17, 80, 5)},    // 上へたどってセクション 10 の一番下の層
+		{-70, skyF(17, 80, 5)},  // ワールドの下の明るさのセクション
+		{100, skyF(17, 112, 5)}, // セクション 12 の一番下の層
+		{200, 15},               // 上に何も無い
+		{335, 15},               // 一番上の明るさのセクション
+	} {
+		if b, sk, ok := c.Light(BlockPos{17, q.y, 5}); !ok || b != 0 || sk != q.want {
+			t.Errorf("Light(17,%d,5) = %d %d %v、期待 0 %d", q.y, b, sk, ok, q.want)
+		}
+	}
+	for _, y := range []int{-81, 336} {
+		if _, _, ok := c.Light(BlockPos{17, y, 5}); ok {
+			t.Errorf("明るさの範囲の外 y=%d が ok", y)
+		}
 	}
 	// 明るさの更新（Update Light）: チャンク (0,0) の y=0〜15 の空を 4 にする
 	s.send(data.PlayClientboundLightUpdate, func(e *protocol.Encoder) {
@@ -344,6 +377,47 @@ func TestWorldFromFakeServer(t *testing.T) {
 	checkBlock(t, c, BlockPos{1, -61, 2}, stairs)
 	checkBlock(t, c, BlockPos{0, -64, 0}, air)
 	checkBlock(t, c, BlockPos{1, -64, 0}, stone)
+
+	// ブロックが変わったセクションと、その周り 26 個のセクションの明るさは古いので ok=false
+	lightOK := func(p BlockPos) bool { _, _, ok := c.Light(p); return ok }
+	// 下のセクションは全部（空の明るさの影）。{3, -40, 5} は 3 つ下、{19, -70, 5} は隣のチャンクの一番下
+	for _, p := range []BlockPos{{3, 0, 5}, {3, 17, 5}, {3, -1, 5}, {-1, 0, 0}, {1, -64, 0}, {1, -50, 0}, {1, -80, 0}, {3, -40, 5}, {19, -70, 5}} {
+		if lightOK(p) {
+			t.Errorf("ブロックが変わったあと Light%v が ok", p)
+		}
+	}
+	if !lightOK(BlockPos{3, 40, 5}) {
+		t.Error("離れたセクションの Light が ok でない")
+	}
+	// そのセクションの明るさが Update Light で届けば印が消える（ほかのセクションは古いまま）
+	s.send(data.PlayClientboundLightUpdate, func(e *protocol.Encoder) {
+		e.WriteVarInt(0)
+		e.WriteVarInt(0)
+		var m protocol.BitSet
+		m.Set(5)
+		e.WriteBitSet(nil)
+		e.WriteBitSet(m) // block light だけ
+		e.WriteBitSet(nil)
+		e.WriteBitSet(nil)
+		e.WriteVarInt(0)
+		e.WriteVarInt(1)
+		e.WritePrefixedBytes(lightOf(func(x, y, z int) int { return 9 }))
+	})
+	s.sync()
+	if b, sk, ok := c.Light(BlockPos{3, 0, 5}); !ok || b != 9 || sk != 4 {
+		t.Errorf("明るさが届いたあと Light(3,0,5) = %d %d %v、期待 9 4", b, sk, ok)
+	}
+	if lightOK(BlockPos{3, 17, 5}) {
+		t.Error("明るさが届いていないセクションが ok")
+	}
+	// チャンクのデータが届けば、そのチャンクの印は全部消える
+	s.sendChunks(col0)
+	for _, p := range []BlockPos{{3, 17, 5}, {1, -64, 0}} {
+		if !lightOK(p) {
+			t.Errorf("チャンクを受け取り直したのに Light%v が ok でない", p)
+		}
+	}
+	checkBlock(t, c, BlockPos{3, 0, 5}, stairs) // 受け取り直した中身に戻る
 
 	// WorldView: 2 つのチャンクと、受け取っていないチャンク (1, 0) と高さの外にまたがる範囲
 	v, err := c.WorldView(BlockPos{20, -70, 3}, BlockPos{-20, 12, 6})

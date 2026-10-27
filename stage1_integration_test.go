@@ -38,10 +38,16 @@ func TestStage1Login(t *testing.T) {
 	}()
 
 	// ログインする。Connect が 10 秒以内に戻る
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	start := time.Now()
-	cl, err := Connect(ctx, Config{Addr: ts.GameAddr, Username: name})
-	cancel()
+	// 同じ IP からの続けてのログインで断られたら、やり直す（testserver.Retry）。10 秒は通った 1 回で測る
+	var cl *Client
+	var start time.Time
+	err := testserver.Retry(context.Background(), t, func() (err error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		start = time.Now()
+		cl, err = Connect(ctx, Config{Addr: ts.GameAddr, Username: name})
+		return err
+	})
 	if err != nil {
 		t.Fatalf("Connect: %v（%v）", err, time.Since(start))
 	}

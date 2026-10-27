@@ -60,6 +60,12 @@ var serverProperties = strings.Join([]string{
 	"",
 }, "\n")
 
+// bukkitYML はコンテナを作るときに置く bukkit.yml。書いていない項目は Paper が既定値で埋める。
+// connection-throttle を -1（無効）にする。既定の 4000 ms だと、同じ IP（Docker のポート転送で
+// どのテストも 172.17.0.1 から来る）から 4 秒以内に次のログインが来ると断られ、並列のテストが失敗する。
+// 作り直したサーバーにだけ効く（動いているサーバーは Retry でやり直す）。
+const bukkitYML = "settings:\n  connection-throttle: -1\n"
+
 // gamerules はサーバーに繋ぐたびに RCON で設定する（何度送っても同じ結果になる）。
 var gamerules = []string{
 	"gamerule doDaylightCycle false",

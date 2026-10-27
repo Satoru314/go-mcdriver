@@ -1,7 +1,7 @@
 // Package mcdriver は Minecraft Java Edition 1.21.4 に bot をログインさせ、
 // ゲームの情報を受け取り、行動を指示するためのドライバ。
 //
-// 今はログインと接続の維持だけができる（単位 3）。
+// 今はログインと接続の維持、地形（Block, Light, WorldView）の受け取りができる。
 //
 //	c, err := mcdriver.Connect(ctx, mcdriver.Config{Addr: "localhost:25565", Username: "bot1"})
 //	if err != nil { ... }
@@ -79,6 +79,9 @@ type Client struct {
 	teleports    int // 受け取った位置の強制修正の数
 	reconfigures int // Play から設定の段階に戻った数
 
+	// features は機能ごとの状態（handlers.go の newFeature で登録したもの）。Connect で作り、あとは変えない
+	features []any
+
 	wg       sync.WaitGroup
 	done     chan struct{}
 	stopOnce sync.Once
@@ -114,6 +117,8 @@ func Connect(ctx context.Context, cfg Config) (*Client, error) {
 			MainHand:     conn.DefaultClientInfo.MainHand,
 		},
 	}
+
+	cl.initFeatures()
 
 	stop := c.WatchContext(ctx)
 	if err := cl.enter(host, port); err != nil {
@@ -278,7 +283,16 @@ func (cl *Client) sendPositionLocked() error {
 }
 
 // handlePlay は Play の段階のパケットを 1 つ処理する。
+// 接続そのものに関わるものはここで扱い、そのあと機能ごとのファイルが登録した処理（handlers.go）を呼ぶ。
 func (cl *Client) handlePlay(p protocol.Packet) error {
+	if err := cl.handleCore(p); err != nil {
+		return err
+	}
+	return cl.dispatchPlay(p)
+}
+
+// handleCore は接続そのものに関わるパケット（Keep Alive、段階の切り替え、切断など）を処理する。
+func (cl *Client) handleCore(p protocol.Packet) error {
 	d := protocol.NewDecoder(p.Data)
 	switch p.ID {
 	case data.PlayClientboundKeepAlive:
@@ -302,13 +316,6 @@ func (cl *Client) handlePlay(p protocol.Packet) error {
 			return fmt.Errorf("mcdriver: Synchronize Player Position: %w", err)
 		}
 		return cl.onTeleport(pp)
-
-	case data.PlayClientboundChunkBatchFinished:
-		// 受け取ったことを伝えないと、サーバーは次のチャンクを送ってこない
-		return cl.c.Send(data.PlayServerboundChunkBatchReceived, func(e *protocol.Encoder) error {
-			e.WriteFloat(chunksPerTick)
-			return nil
-		})
 
 	case data.PlayClientboundStartConfiguration:
 		return cl.reconfigure()
@@ -335,13 +342,10 @@ func (cl *Client) handlePlay(p protocol.Packet) error {
 		return ErrTransfer
 
 	default:
-		// 知らないパケットは読み飛ばす（今後の単位で扱う）
+		// ほかのパケットは機能ごとのファイルが扱う（登録が無ければ読み飛ばす）
 	}
 	return nil
 }
-
-// chunksPerTick は Chunk Batch Received で伝える「1 ティックに受け取れるチャンクの数」。
-const chunksPerTick = 20
 
 // onTeleport はサーバーからの位置の強制修正を当てはめ、確認と位置を送り返す。
 func (cl *Client) onTeleport(pp packets.PlayerPosition) error {

@@ -24,7 +24,6 @@ import (
 
 	"github.com/Satoru314/go-mcdriver/data"
 	"github.com/Satoru314/go-mcdriver/internal/packets"
-	"github.com/Satoru314/go-mcdriver/internal/physics"
 	"github.com/Satoru314/go-mcdriver/internal/protocol"
 	"gonum.org/v1/gonum/spatial/r3"
 )
@@ -459,9 +458,10 @@ func (cl *Client) sendPlayerActionLocked(status int32, p BlockPos, f Face, seq i
 	})
 }
 
-// eyeLocked は目の位置を返す。cl.mu を持って呼ぶ。
+// eyeLocked は目の位置を返す。目の高さは姿勢で変わる（立って 1.62、しゃがんで 1.27、泳いで 0.4。controls.go の LookAt と同じ）。
+// cl.mu を持って呼ぶ。
 func (cl *Client) eyeLocked() r3.Vec {
-	return r3.Vec{X: cl.x, Y: cl.y + float64(physics.EyeHeight), Z: cl.z}
+	return r3.Vec{X: cl.x, Y: cl.y + float64(moveKey.of(cl).p.EyeHeight()), Z: cl.z}
 }
 
 // aimLocked は目の位置から p を向く（controls.go の lookAtLocked。yaw は -180 以上 180 未満）。cl.mu を持って呼ぶ。
@@ -834,7 +834,7 @@ func heldTool(it *data.Item) *data.Tool {
 // eyeInWaterLocked は目が水の中かを返す（本家 Entity.updateFluidOnEyes: 目の高さ - 0.11111111 の位置の
 // ブロックの水の高さより低いか）。cl.mu を持って呼ぶ。
 func (cl *Client) eyeInWaterLocked() bool {
-	y := cl.y + float64(physics.EyeHeight) - float64(float32(0.11111111))
+	y := cl.eyeLocked().Y - float64(float32(0.11111111))
 	p := BlockPosOf(r3.Vec{X: cl.x, Y: y, Z: cl.z})
 	s, ok := cl.blockLocked(p)
 	if !ok {

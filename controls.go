@@ -103,11 +103,12 @@ func (cl *Client) Controls() Controls {
 }
 
 // Look は向きを変える（度）。yaw は 0 が南（+z）、90 が西（-x）、-90 が東（+x）、180 が北（-z）。
+// yaw は -180 以上 180 未満に直して持ち、送る（wrapDegrees）。
 // pitch は 0 が水平、90 が真下、-90 が真上（-90〜90 に収める）。次のティックでサーバーに送る。
 func (cl *Client) Look(yaw, pitch float32) {
 	cl.mu.Lock()
 	defer cl.mu.Unlock()
-	cl.yaw = yaw
+	cl.yaw = wrapDegrees(yaw)
 	cl.pitch = max(-90, min(90, pitch))
 }
 
@@ -115,18 +116,40 @@ func (cl *Client) Look(yaw, pitch float32) {
 func (cl *Client) LookAt(p r3.Vec) {
 	cl.mu.Lock()
 	defer cl.mu.Unlock()
-	dx := p.X - cl.x
-	dy := p.Y - (cl.y + float64(moveKey.of(cl).p.EyeHeight()))
-	dz := p.Z - cl.z
+	eye := r3.Vec{X: cl.x, Y: cl.y + float64(moveKey.of(cl).p.EyeHeight()), Z: cl.z}
+	cl.lookAtLocked(eye, p)
+}
+
+// lookAtLocked は eye から p を向く（LookAt と、行動の前に向く actions.go の aimLocked が使う）。
+// 本家の LookControl と同じ式（atan2(dz, dx) - 90 度）で、yaw は -180 以上 180 未満に直す。
+// 真上・真下では yaw を変えない。cl.mu を持って呼ぶ。
+func (cl *Client) lookAtLocked(eye, p r3.Vec) {
+	dx, dy, dz := p.X-eye.X, p.Y-eye.Y, p.Z-eye.Z
 	h := math.Hypot(dx, dz)
 	if h < 1e-9 && math.Abs(dy) < 1e-9 {
 		return
 	}
 	if h >= 1e-9 {
-		// 本家の LookControl と同じ式（atan2(dz, dx) - 90 度）
-		cl.yaw = float32(math.Atan2(dz, dx)*180/math.Pi) - 90
+		cl.yaw = wrapDegrees(float32(math.Atan2(dz, dx)*180/math.Pi) - 90)
 	}
 	cl.pitch = max(-90, min(90, float32(-math.Atan2(dy, h)*180/math.Pi)))
+}
+
+// wrapDegrees は角度を -180 以上 180 未満にする（本家の Mth.wrapDegrees）。
+//
+// 送る向きは、サーバーが持つ値（Mth.wrapDegrees で -180〜180 に直した値）と同じ形にする。
+// Paper 1.21.4 は、tp のあと最初に PlayerMoveEvent を出すとき、前に送られた向き（直す前の値）と今の向き（直した値）が
+// 違うと、その向きのパケットを捨てる（実地テストで、180 を送ったあとの -90 が捨てられた。
+// reports/2026-10-28-unit9-TestActionsIntegration-place-yaw.md）。
+func wrapDegrees(a float32) float32 {
+	f := float32(math.Mod(float64(a), 360))
+	if f >= 180 {
+		f -= 360
+	}
+	if f < -180 {
+		f += 360
+	}
+	return f
 }
 
 // Sprinting は今走っているかを返す。
@@ -202,6 +225,7 @@ func (cl *Client) moveTickLocked() error {
 	in := physics.Input{
 		Forward: ms.ctl.Forward, Back: ms.ctl.Back, Left: ms.ctl.Left, Right: ms.ctl.Right,
 		Jump: ms.ctl.Jump, Sprint: ms.ctl.Sprint, Sneak: ms.ctl.Sneak,
+		UsingItem: cl.usingItemLocked(), // アイテムを使っているあいだは 0.2 倍（actions.go の StartUseItem）
 	}
 	// 満腹度と飛べるか（走れるかに効く）。Set Health がまだ届いていない（HP も満腹度も 0）なら、本家の初めの値 20 とする
 	ss := selfKey.of(cl)

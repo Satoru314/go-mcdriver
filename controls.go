@@ -4,9 +4,10 @@ package mcdriver
 //
 // 毎ティック（client.go の tick）に、本家のクライアント（LocalPlayer.tick）と同じ順で次を行う:
 //  1. 物理を 1 ティック進める（internal/physics）。周りのチャンクが読み込まれていなければ動かない
-//  2. キーの状態が変わっていれば Player Input を送る
-//  3. 走る状態が変わっていれば Player Command（走り始め / 走りやめ）を送る
-//  4. 位置と向きを、本家の LocalPlayer.sendPosition と同じ決まりで送る:
+//  2. しゃがむキーが変わっていれば Player Command（しゃがむ / しゃがみやめ）を送る（sendShiftKeyState）
+//  3. キーの状態が変わっていれば Player Input を送る
+//  4. 走る状態が変わっていれば Player Command（走り始め / 走りやめ）を送る
+//  5. 位置と向きを、本家の LocalPlayer.sendPosition と同じ決まりで送る:
 //     2.0E-4 より動いたか 20 ティック送っていなければ位置、向きが変わっていれば向き、
 //     どちらも無く接地か横の衝突が変わっていれば Status Only。何も変わらなければ送らない
 
@@ -27,8 +28,11 @@ type Controls struct {
 	Forward, Back, Left, Right bool
 	// Jump は押しているあいだ、着地するたびにジャンプする。水の中では浮き上がる
 	Jump bool
-	// Sprint は前に進んでいるあいだ走る。水の中、正面から壁にぶつかったとき、前に押していないときは走らない
+	// Sprint は前に進んでいるあいだ走る。正面から壁にぶつかったとき、前に押していないとき、しゃがんでいるとき、
+	// 満腹度が 6 以下のときは走らない。水に浸かっていても目が水の外なら走らず、目まで水に入っていれば泳ぐ（当たり判定が 0.6 の高さになる）
 	Sprint bool
+	// Sneak はしゃがむ。遅く（0.3 倍）なり、当たり判定の高さが 1.5 になり、地面の端から落ちない。水の中では沈む
+	Sneak bool
 }
 
 // moveState は移動の状態。Client の mu で守る（位置 cl.x などと一緒に扱うため）。
@@ -43,6 +47,7 @@ type moveState struct {
 	positionReminder             int
 	sentInput                    uint8
 	sentSprint                   bool
+	sentShift                    bool
 }
 
 var moveKey = newFeature(func(*Client) *moveState { return &moveState{} })
@@ -54,6 +59,8 @@ func init() {
 		defer cl.mu.Unlock()
 		ms := moveKey.of(cl)
 		ms.p = physics.Player{}
+		// 本家はプレイヤーを作り直すので、最後に送ったキーと走る・しゃがむの状態も初めに戻る
+		ms.sentInput, ms.sentSprint, ms.sentShift = 0, false, false
 		return nil
 	})
 	onPlay(data.PlayClientboundSetEntityMotion, (*Client).moveOnMotion)
@@ -104,12 +111,12 @@ func (cl *Client) Look(yaw, pitch float32) {
 	cl.pitch = max(-90, min(90, pitch))
 }
 
-// LookAt は目の位置から p を向く。
+// LookAt は目の位置から p を向く。目の高さは姿勢で変わる（立って 1.62、しゃがんで 1.27、泳いで 0.4）。
 func (cl *Client) LookAt(p r3.Vec) {
 	cl.mu.Lock()
 	defer cl.mu.Unlock()
 	dx := p.X - cl.x
-	dy := p.Y - (cl.y + float64(physics.EyeHeight))
+	dy := p.Y - (cl.y + float64(moveKey.of(cl).p.EyeHeight()))
 	dz := p.Z - cl.z
 	h := math.Hypot(dx, dz)
 	if h < 1e-9 && math.Abs(dy) < 1e-9 {
@@ -128,6 +135,30 @@ func (cl *Client) Sprinting() bool {
 	defer cl.mu.Unlock()
 	return moveKey.of(cl).p.Sprinting
 }
+
+// Swimming は今泳いでいるかを返す。
+func (cl *Client) Swimming() bool {
+	cl.mu.Lock()
+	defer cl.mu.Unlock()
+	return moveKey.of(cl).p.Swimming
+}
+
+// Pose は今の姿勢（立つ・しゃがむ・泳ぐ）を返す。
+func (cl *Client) Pose() Pose {
+	cl.mu.Lock()
+	defer cl.mu.Unlock()
+	return moveKey.of(cl).p.Pose
+}
+
+// Pose は姿勢。当たり判定の高さと目の高さが変わる。
+type Pose = physics.Pose
+
+// 姿勢の値。
+const (
+	PoseStanding  = physics.PoseStanding
+	PoseCrouching = physics.PoseCrouching
+	PoseSwimming  = physics.PoseSwimming
+)
 
 // velocityLocked は今の速さ（1 ティックあたり）を返す。mu を持って呼ぶ。
 func (cl *Client) velocityLocked() r3.Vec { return moveKey.of(cl).p.Vel }
@@ -170,14 +201,41 @@ func (cl *Client) moveTickLocked() error {
 
 	in := physics.Input{
 		Forward: ms.ctl.Forward, Back: ms.ctl.Back, Left: ms.ctl.Left, Right: ms.ctl.Right,
-		Jump: ms.ctl.Jump, Sprint: ms.ctl.Sprint,
+		Jump: ms.ctl.Jump, Sprint: ms.ctl.Sprint, Sneak: ms.ctl.Sneak,
 	}
+	// 満腹度と飛べるか（走れるかに効く）。Set Health がまだ届いていない（HP も満腹度も 0）なら、本家の初めの値 20 とする
+	ss := selfKey.of(cl)
+	ss.mu.RLock()
+	p.Food, p.MayFly = ss.s.Food, ss.s.Abilities.AllowFlying
+	if ss.s.Health == 0 && ss.s.Food == 0 {
+		p.Food = 20
+	}
+	ss.mu.RUnlock()
 	ws := worldKey.of(cl)
 	ws.mu.RLock()
+	// 溶岩の流れの強さはディメンションの ultrawarm で変わる。公式のディメンションのうちネザーだけが ultrawarm
+	p.UltraWarm = ws.dim.Name == "minecraft:the_nether"
 	p.Tick(physWorld{ws.w}, in)
 	ws.mu.RUnlock()
 	cl.x, cl.y, cl.z = p.Pos.X, p.Pos.Y, p.Pos.Z
 	cl.onGround = p.OnGround
+
+	// Player Command（しゃがむキーが変わったときだけ。本家の sendShiftKeyState）
+	if ms.ctl.Sneak != ms.sentShift {
+		action := int32(playerCommandReleaseShiftKey)
+		if ms.ctl.Sneak {
+			action = playerCommandPressShiftKey
+		}
+		if err := cl.c.Send(data.PlayServerboundPlayerCommand, func(e *protocol.Encoder) error {
+			e.WriteVarInt(cl.login.EntityID)
+			e.WriteVarInt(action)
+			e.WriteVarInt(0)
+			return nil
+		}); err != nil {
+			return err
+		}
+		ms.sentShift = ms.ctl.Sneak
+	}
 
 	// Player Input（キーが変わったときだけ）
 	if k := inputFlags(ms.ctl); k != ms.sentInput {
@@ -208,7 +266,7 @@ func inputFlags(c Controls) uint8 {
 	for _, f := range []struct {
 		on   bool
 		flag uint8
-	}{{c.Forward, inputForward}, {c.Back, inputBackward}, {c.Left, inputLeft}, {c.Right, inputRight}, {c.Jump, inputJump}, {c.Sprint, inputSprint}} {
+	}{{c.Forward, inputForward}, {c.Back, inputBackward}, {c.Left, inputLeft}, {c.Right, inputRight}, {c.Jump, inputJump}, {c.Sneak, inputShift}, {c.Sprint, inputSprint}} {
 		if f.on {
 			k |= f.flag
 		}
@@ -218,8 +276,10 @@ func inputFlags(c Controls) uint8 {
 
 // Player Command の動作（1.21.4）。
 const (
-	playerCommandStartSprinting = 3
-	playerCommandStopSprinting  = 4
+	playerCommandPressShiftKey   = 0
+	playerCommandReleaseShiftKey = 1
+	playerCommandStartSprinting  = 3
+	playerCommandStopSprinting   = 4
 )
 
 // sendMovementLocked は本家の LocalPlayer.sendPosition（sendIsSprintingIfNeeded を含む）。

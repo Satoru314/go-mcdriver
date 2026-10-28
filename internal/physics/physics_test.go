@@ -50,7 +50,7 @@ func near(a, b, eps float64) bool { return math.Abs(a-b) <= eps }
 // 平らな床に落ちて、ちょうど床の上（y=1）で止まり、地面に立つ。
 func TestFallAndLand(t *testing.T) {
 	w := floorWorld(5, "stone")
-	p := &Player{Pos: r3.Vec{X: 0.5, Y: 10, Z: 0.5}}
+	p := &Player{Food: 20, Pos: r3.Vec{X: 0.5, Y: 10, Z: 0.5}}
 	ticks := 0
 	for ; ticks < 100 && !p.OnGround; ticks++ {
 		p.Tick(w, Input{})
@@ -74,7 +74,7 @@ func TestFallAndLand(t *testing.T) {
 // 立ってジャンプしたときの最高点は 約 1.2522（Minecraft Wiki の Jumping: 1.2522 ブロック）。
 func TestJumpHeight(t *testing.T) {
 	w := floorWorld(5, "stone")
-	p := &Player{Pos: r3.Vec{X: 0.5, Y: 1, Z: 0.5}}
+	p := &Player{Food: 20, Pos: r3.Vec{X: 0.5, Y: 1, Z: 0.5}}
 	p.Tick(w, Input{}) // 接地させる（速さ 0 からは 2 ティック目で下にぶつかる）
 	p.Tick(w, Input{})
 	if !p.OnGround {
@@ -105,7 +105,7 @@ func TestJumpHeight(t *testing.T) {
 func steadySpeed(t *testing.T, ground string, in Input, yaw float32) float64 {
 	t.Helper()
 	w := floorWorld(150, ground)
-	p := &Player{Pos: r3.Vec{X: -100.5, Y: 1, Z: 0.5}, Yaw: yaw}
+	p := &Player{Food: 20, Pos: r3.Vec{X: -100.5, Y: 1, Z: 0.5}, Yaw: yaw}
 	p.Tick(w, Input{})
 	for range 60 {
 		p.Tick(w, in)
@@ -155,7 +155,7 @@ func TestWalkAndSprintSpeed(t *testing.T) {
 // 走りジャンプは前に 0.2 足されるので、走るだけより速い（Minecraft Wiki: 約 7.1 m/s）。
 func TestSprintJumpFaster(t *testing.T) {
 	w := floorWorld(150, "stone")
-	p := &Player{Pos: r3.Vec{X: -100.5, Y: 1, Z: 0.5}, Yaw: -90}
+	p := &Player{Food: 20, Pos: r3.Vec{X: -100.5, Y: 1, Z: 0.5}, Yaw: -90}
 	p.Tick(w, Input{})
 	for range 60 {
 		p.Tick(w, Input{Forward: true, Sprint: true, Jump: true})
@@ -188,7 +188,7 @@ func TestStepUp(t *testing.T) {
 			w[BlockPos{x, 1, z}] = mustState(t, "oak_slab", map[string]string{"type": "bottom"})
 		}
 	}
-	p := &Player{Pos: r3.Vec{X: 0.5, Y: 1, Z: 0.5}}
+	p := &Player{Food: 20, Pos: r3.Vec{X: 0.5, Y: 1, Z: 0.5}}
 	walkEast(w, p, 25, Input{})
 	if p.Pos.Y != 1.5 || p.Pos.X < 4 {
 		t.Errorf("ハーフブロックに上れない: %v", p.Pos)
@@ -201,7 +201,7 @@ func TestStepUp(t *testing.T) {
 			w[BlockPos{x, 1, z}] = mustState(t, "stone", nil)
 		}
 	}
-	p = &Player{Pos: r3.Vec{X: 0.5, Y: 1, Z: 0.5}}
+	p = &Player{Food: 20, Pos: r3.Vec{X: 0.5, Y: 1, Z: 0.5}}
 	walkEast(w, p, 40, Input{})
 	if p.Pos.Y != 1 || !near(p.Pos.X, 3-HalfWidth, 1e-6) {
 		t.Errorf("1 ブロックの段差: 位置 %v、期待は x=%.4f y=1", p.Pos, 3-HalfWidth)
@@ -211,7 +211,7 @@ func TestStepUp(t *testing.T) {
 	}
 
 	// 1 ブロックの段差はジャンプすれば上れる
-	p = &Player{Pos: r3.Vec{X: 0.5, Y: 1, Z: 0.5}}
+	p = &Player{Food: 20, Pos: r3.Vec{X: 0.5, Y: 1, Z: 0.5}}
 	walkEast(w, p, 30, Input{Jump: true})
 	walkEast(w, p, 15, Input{})
 	if p.Pos.Y != 2 || p.Pos.X < 4 {
@@ -226,7 +226,7 @@ func TestWallStops(t *testing.T) {
 			w[BlockPos{3, y, z}] = mustState(t, "stone", nil)
 		}
 	}
-	p := &Player{Pos: r3.Vec{X: 0.5, Y: 1, Z: 0.5}}
+	p := &Player{Food: 20, Pos: r3.Vec{X: 0.5, Y: 1, Z: 0.5}}
 	walkEast(w, p, 40, Input{Sprint: true, Jump: true})
 	if !near(p.Pos.X, 3-HalfWidth, 1e-6) {
 		t.Errorf("壁で止まらない: x=%v", p.Pos.X)
@@ -257,7 +257,7 @@ func TestStairs(t *testing.T) {
 			}
 		}
 	}
-	p := &Player{Pos: r3.Vec{X: 0.5, Y: 1, Z: 0.5}}
+	p := &Player{Food: 20, Pos: r3.Vec{X: 0.5, Y: 1, Z: 0.5}}
 	walkEast(w, p, 40, Input{})
 	if p.Pos.Y != 4 || p.Pos.X < 7 || p.Pos.X > 14 {
 		t.Errorf("階段を上りきれない: %v", p.Pos)
@@ -280,7 +280,7 @@ func TestSlabsWalkable(t *testing.T) {
 			w[BlockPos{x, 1, z}] = mustState(t, "oak_slab", map[string]string{"type": "bottom"})
 		}
 	}
-	p := &Player{Pos: r3.Vec{X: 0.5, Y: 1, Z: 0.5}}
+	p := &Player{Food: 20, Pos: r3.Vec{X: 0.5, Y: 1, Z: 0.5}}
 	walkEast(w, p, 40, Input{})
 	if p.Pos.Y != 1.5 || p.Pos.X < 6 || !p.OnGround {
 		t.Errorf("ハーフブロックの上: %v onGround=%v", p.Pos, p.OnGround)
@@ -304,7 +304,7 @@ func waterWorld() testWorld {
 func TestWater(t *testing.T) {
 	w := waterWorld()
 	// 水面の近く（y=4）から、何もしなければゆっくり沈む
-	p := &Player{Pos: r3.Vec{X: 0.5, Y: 4, Z: 0.5}}
+	p := &Player{Food: 20, Pos: r3.Vec{X: 0.5, Y: 4, Z: 0.5}}
 	for range 20 {
 		p.Tick(w, Input{})
 	}
@@ -344,7 +344,7 @@ func TestWaterSlowerAndExit(t *testing.T) {
 			w[BlockPos{x, 1, z}] = ws
 		}
 	}
-	p := &Player{Pos: r3.Vec{X: 2.5, Y: 1, Z: 0.5}}
+	p := &Player{Food: 20, Pos: r3.Vec{X: 2.5, Y: 1, Z: 0.5}}
 	walkEast(w, p, 20, Input{})
 	if !p.InWater {
 		t.Fatal("InWater が偽")
@@ -369,7 +369,7 @@ func TestLadder(t *testing.T) {
 		w[BlockPos{2, y, 0}] = mustState(t, "stone", nil)
 		w[BlockPos{1, y, 0}] = mustState(t, "ladder", map[string]string{"facing": "west"})
 	}
-	p := &Player{Pos: r3.Vec{X: 1.5, Y: 1, Z: 0.5}}
+	p := &Player{Food: 20, Pos: r3.Vec{X: 1.5, Y: 1, Z: 0.5}}
 	walkEast(w, p, 20, Input{})
 	if p.Pos.Y < 3 {
 		t.Errorf("梯子を上らない: y=%v", p.Pos.Y)
@@ -394,7 +394,7 @@ func TestLadder(t *testing.T) {
 
 func TestNotLoadedDoesNotMove(t *testing.T) {
 	w := floorWorld(5, "stone")
-	p := &Player{Pos: r3.Vec{X: 300.5, Y: 50, Z: 0.5}}
+	p := &Player{Food: 20, Pos: r3.Vec{X: 300.5, Y: 50, Z: 0.5}}
 	for range 10 {
 		if p.Tick(w, Input{Forward: true}) {
 			t.Fatal("読み込まれていない場所で Tick が真")
@@ -411,7 +411,7 @@ func TestFenceNotJumpable(t *testing.T) {
 	for z := -3; z <= 3; z++ {
 		w[BlockPos{3, 1, z}] = mustState(t, "oak_fence", map[string]string{"north": "true", "south": "true"})
 	}
-	p := &Player{Pos: r3.Vec{X: 0.5, Y: 1, Z: 0.5}}
+	p := &Player{Food: 20, Pos: r3.Vec{X: 0.5, Y: 1, Z: 0.5}}
 	walkEast(w, p, 60, Input{Jump: true})
 	// フェンスの柱は x が 0.375〜0.625 なので、x = 3.375 - 0.3 で止まる
 	if p.Pos.X > 3.375-HalfWidth+1e-6 {
@@ -422,8 +422,8 @@ func TestFenceNotJumpable(t *testing.T) {
 func TestSinTable(t *testing.T) {
 	for _, d := range []float64{0, 30, 45, 90, -90, 180, 359} {
 		r := d * math.Pi / 180
-		if !near(float64(mthSin(r)), math.Sin(r), 1e-4) || !near(float64(mthCos(r)), math.Cos(r), 1e-4) {
-			t.Errorf("sin/cos(%v) = %v %v", d, mthSin(r), mthCos(r))
+		if !near(float64(mthSin(float32(r))), math.Sin(r), 1e-4) || !near(float64(mthCos(float32(r))), math.Cos(r), 1e-4) {
+			t.Errorf("sin/cos(%v) = %v %v", d, mthSin(float32(r)), mthCos(float32(r)))
 		}
 	}
 }

@@ -515,10 +515,16 @@ func (cl *Client) worldOnLightUpdate(d *protocol.Decoder) error {
 // markStaleAround は sp とその周り 26 個のセクションの明るさに「古い」の印を付ける。mu を持って呼ぶ。
 // 光は最大 15 ブロック届くので、セクションの角のブロックが変わると斜めの隣のセクションまで変わりうる。
 // さらに、その下のセクションにも全部印を付ける（上にブロックが増えたり減ったりすると、空の明るさの影は下へいくらでも届く）。
+// 読み込んでいないチャンクのセクションには付けない。
 func (ws *worldState) markStaleAround(sp chunk.SectionPos) {
 	lo, _ := ws.lightSectionRange()
 	for dx := -1; dx <= 1; dx++ {
 		for dz := -1; dz <= 1; dz++ {
+			// 読み込んでいないチャンクには付けない（読み込むときは新しい明るさが一緒に届く。
+			// 付けると、そのチャンクが読み込まれないまま離れたときに印が残り続ける）
+			if ws.w.Column(int32(sp.X+dx), int32(sp.Z+dz)) == nil {
+				continue
+			}
 			for y := min(lo, sp.Y-1); y <= sp.Y+1; y++ {
 				ws.staleLight[chunk.SectionPos{X: sp.X + dx, Y: y, Z: sp.Z + dz}] = struct{}{}
 			}

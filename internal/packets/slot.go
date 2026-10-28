@@ -80,6 +80,31 @@ func SkipComponents(d *protocol.Decoder) error {
 	return s.err
 }
 
+// TouchesComponent は、部品情報の差分のバイト列 b（Slot.Components の形）が、部品 name（"minecraft:" を外した名前。
+// 例 "attribute_modifiers"）を足すか消すか（アイテムの既定の値を上書きするか）を返す。
+// 差分が無ければ false。読めない（知らない部品など）ときは、分からないので true を返す。
+func TouchesComponent(b []byte, name string) bool {
+	if len(b) == 0 {
+		return false
+	}
+	s := skipper{d: protocol.NewDecoder(b)}
+	add := s.count()
+	remove := s.count()
+	for i := 0; i < add && s.err == nil; i++ {
+		t := s.varint()
+		if s.err == nil && registryName(componentTypes, t) == name {
+			return true
+		}
+		s.component(t)
+	}
+	for i := 0; i < remove && s.err == nil; i++ {
+		if t := s.varint(); s.err == nil && registryName(componentTypes, t) == name {
+			return true
+		}
+	}
+	return s.err != nil
+}
+
 // WriteSlot はスロットを書く。部品情報は Components をそのまま書く（無ければ差分なし）。
 func WriteSlot(e *protocol.Encoder, s Slot) {
 	if s.Empty() {

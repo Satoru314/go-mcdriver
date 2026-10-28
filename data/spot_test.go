@@ -192,6 +192,43 @@ func TestItems(t *testing.T) {
 	}
 }
 
+// 属性の修飾（公式データの attribute_modifiers）。
+func TestItemAttributeModifiers(t *testing.T) {
+	speed := func(name string) float64 {
+		t.Helper()
+		it, ok := ItemByName(name)
+		if !ok {
+			t.Fatalf("%s が無い", name)
+		}
+		for _, m := range it.AttributeModifiers {
+			if m.Attribute == "attack_speed" {
+				if m.ID != "minecraft:base_attack_speed" || m.Operation != "add_value" || m.Slot != "mainhand" || !m.InMainHand() {
+					t.Errorf("%s の攻撃速度の修飾 %+v", name, m)
+				}
+				return m.Amount
+			}
+		}
+		t.Fatalf("%s に攻撃速度の修飾が無い", name)
+		return 0
+	}
+	// 本家の Item.Properties.sword / axe / pickaxe の攻撃速度（float を double にしたもの）
+	for name, want := range map[string]float64{
+		"diamond_sword": -2.4000000953674316, "iron_axe": -3.0999999046325684, "wooden_axe": -3.200000047683716,
+		"iron_pickaxe": -2.799999952316284, "mace": -3.4000000953674316,
+	} {
+		if got := speed(name); got != want {
+			t.Errorf("%s の攻撃速度の修飾 %v、期待 %v", name, got, want)
+		}
+	}
+	if st, _ := ItemByName("stick"); st.AttributeModifiers != nil {
+		t.Errorf("stick の修飾 %+v", st.AttributeModifiers)
+	}
+	h, _ := ItemByName("diamond_helmet")
+	if len(h.AttributeModifiers) == 0 || h.AttributeModifiers[0].Slot != "head" || h.AttributeModifiers[0].InMainHand() {
+		t.Errorf("diamond_helmet の修飾 %+v", h.AttributeModifiers)
+	}
+}
+
 func TestTags(t *testing.T) {
 	stone, _ := BlockByName("stone")
 	if !BlockHasTag(stone.ID, "#minecraft:mineable/pickaxe") {

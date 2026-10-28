@@ -133,13 +133,22 @@ func TestReportsItems(t *testing.T) {
 			Tool *struct {
 				Rules []json.RawMessage `json:"rules"`
 			} `json:"minecraft:tool"`
+			AttributeModifiers *struct {
+				Modifiers []struct {
+					Type      string  `json:"type"`
+					ID        string  `json:"id"`
+					Amount    float64 `json:"amount"`
+					Operation string  `json:"operation"`
+					Slot      string  `json:"slot"`
+				} `json:"modifiers"`
+			} `json:"minecraft:attribute_modifiers"`
 		} `json:"components"`
 	}
 	loadJSON(t, filepath.Join(dir, "reports", "items.json"), &raw)
 	if len(Items()) != len(raw) {
 		t.Errorf("アイテムの数 %d, reports %d", len(Items()), len(raw))
 	}
-	foods, tools := 0, 0
+	foods, tools, mods := 0, 0, 0
 	for name, ri := range raw {
 		it, ok := ItemByName(name)
 		if !ok {
@@ -169,8 +178,28 @@ func TestReportsItems(t *testing.T) {
 				t.Errorf("%s: 道具の規則 %d 個, reports %d 個", name, len(it.Tool.Rules), len(c.Tool.Rules))
 			}
 		}
+		var want []AttributeModifier
+		if c.AttributeModifiers != nil {
+			for _, m := range c.AttributeModifiers.Modifiers {
+				slot := m.Slot
+				if slot == "" {
+					slot = "any"
+				}
+				want = append(want, AttributeModifier{Attribute: strings.TrimPrefix(m.Type, "minecraft:"), ID: m.ID, Amount: m.Amount, Operation: m.Operation, Slot: slot})
+			}
+		}
+		if len(it.AttributeModifiers) != len(want) {
+			t.Errorf("%s: 属性の修飾 %d 個, reports %d 個", name, len(it.AttributeModifiers), len(want))
+		} else {
+			for i := range want {
+				if it.AttributeModifiers[i] != want[i] {
+					t.Errorf("%s: 属性の修飾 %+v, reports %+v", name, it.AttributeModifiers[i], want[i])
+				}
+			}
+			mods += len(want)
+		}
 	}
-	t.Logf("アイテム %d（食べ物 %d, 道具 %d）", len(raw), foods, tools)
+	t.Logf("アイテム %d（食べ物 %d, 道具 %d, 属性の修飾 %d）", len(raw), foods, tools, mods)
 }
 
 func TestReportsPackets(t *testing.T) {

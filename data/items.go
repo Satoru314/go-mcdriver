@@ -12,6 +12,27 @@ type Item struct {
 	Food         *Food       // 食べ物（minecraft:food）。食べ物でなければ nil
 	Consumable   *Consumable // 使うと消費される（食べる・飲む）もの（minecraft:consumable）。でなければ nil
 	Tool         *Tool       // 道具（minecraft:tool）。道具でなければ nil
+	// AttributeModifiers は手に持つ・身に着けたときに付く属性の修飾（minecraft:attribute_modifiers の既定値。
+	// 剣の攻撃力と攻撃速度、防具の防御力など）。無ければ nil
+	AttributeModifiers []AttributeModifier
+}
+
+// AttributeModifier は属性の修飾 1 つ（本家の ItemAttributeModifiers.Entry）。
+type AttributeModifier struct {
+	Attribute string  // 属性の名前（"minecraft:" を外した名前。例 "attack_speed"）
+	ID        string  // 修飾の ID（名前空間つき。例 "minecraft:base_attack_speed"）。同じ属性で同じ ID の修飾は置き換わる
+	Amount    float64 // 値
+	// Operation は計算のしかた: "add_value"（足す）、"add_multiplied_base"（元の値 × 値 を足す）、
+	// "add_multiplied_total"（1 + 値 を掛ける）
+	Operation string
+	// Slot は効く場所: "any", "hand", "mainhand", "offhand", "armor", "head", "chest", "legs", "feet", "body"
+	// （公式データで省略されたものは本家の既定の "any"）
+	Slot string
+}
+
+// InMainHand は、この修飾が利き手に持ったときに効くかを返す（本家の EquipmentSlotGroup.test(MAINHAND)）。
+func (m *AttributeModifier) InMainHand() bool {
+	return m.Slot == "any" || m.Slot == "hand" || m.Slot == "mainhand"
 }
 
 // Food は食べ物の回復量。

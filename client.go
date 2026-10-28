@@ -292,7 +292,7 @@ func (cl *Client) tick() (err error) {
 			err = panicErr("毎ティックの処理", r)
 		}
 	}()
-	held := cl.actHeld() // 手に持っている物（持ち物の鍵で読むので、cl.mu を持つ前に。actions.go）
+	held, custom := cl.actHeldStack() // 手に持っている物（持ち物の鍵で読むので、cl.mu を持つ前に。actions.go）
 	cl.mu.Lock()
 	defer cl.mu.Unlock()
 	if cl.state != data.StatePlay || !cl.hasPos {
@@ -303,7 +303,7 @@ func (cl *Client) tick() (err error) {
 		return err
 	}
 	// 行動（掘る・置く・攻撃など）は、向きを送ったあとに送る（actions.go）
-	if err := cl.actTickLocked(held); err != nil {
+	if err := cl.actTickLocked(held, custom); err != nil {
 		return err
 	}
 	// 1.21.2 から、公式のクライアントはティックの終わりに Client Tick End を送る

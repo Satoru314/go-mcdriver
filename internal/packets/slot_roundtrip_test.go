@@ -562,3 +562,34 @@ func TestContainerPackets(t *testing.T) {
 		t.Errorf("Click Container: %+v", gk)
 	}
 }
+
+// TouchesComponent: 差分が部品を足すか消すかを見分ける。
+func TestTouchesComponent(t *testing.T) {
+	comps := survivalComponents(t)
+	var attr, others []comp
+	for _, c := range comps {
+		if c.name == "attribute_modifiers" {
+			attr = append(attr, c)
+		} else {
+			others = append(others, c)
+		}
+	}
+	_, onlyOthers := encodeSlot(t, 1, "diamond_sword", others, []string{"food"})
+	_, withAttr := encodeSlot(t, 1, "diamond_sword", append(others, attr...), nil)
+	_, removed := encodeSlot(t, 1, "diamond_sword", others[:2], []string{"attribute_modifiers"})
+	for _, tc := range []struct {
+		name string
+		b    []byte
+		want bool
+	}{
+		{"差分なし", nil, false},
+		{"ほかの部品だけ", onlyOthers, false},
+		{"attribute_modifiers を足す", withAttr, true},
+		{"attribute_modifiers を消す", removed, true},
+		{"途中で切れている", withAttr[:len(withAttr)/2], true},
+	} {
+		if got := TouchesComponent(tc.b, "attribute_modifiers"); got != tc.want {
+			t.Errorf("%s: %v、期待 %v", tc.name, got, tc.want)
+		}
+	}
+}

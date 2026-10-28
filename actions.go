@@ -452,34 +452,9 @@ func (cl *Client) eyeLocked() r3.Vec {
 	return r3.Vec{X: cl.x, Y: cl.y + float64(physics.EyeHeight), Z: cl.z}
 }
 
-// aimLocked は目の位置から p を向く（controls.go の LookAt と同じ式）。cl.mu を持って呼ぶ。
+// aimLocked は目の位置から p を向く（controls.go の lookAtLocked。yaw は -180 以上 180 未満）。cl.mu を持って呼ぶ。
 func (cl *Client) aimLocked(p r3.Vec) {
-	e := cl.eyeLocked()
-	dx, dy, dz := p.X-e.X, p.Y-e.Y, p.Z-e.Z
-	h := math.Hypot(dx, dz)
-	if h < 1e-9 && math.Abs(dy) < 1e-9 {
-		return
-	}
-	if h >= 1e-9 {
-		cl.yaw = wrapDegrees(float32(math.Atan2(dz, dx)*180/math.Pi) - 90)
-	}
-	cl.pitch = max(-90, min(90, float32(-math.Atan2(dy, h)*180/math.Pi)))
-}
-
-// wrapDegrees は角度を -180 以上 180 未満にする（本家の Mth.wrapDegrees）。
-//
-// 行動の前に向く向きは、サーバーが持つ値（Mth.wrapDegrees で -180〜180 に直した値）と同じ形で送る。
-// Paper 1.21.4 は、tp のあと最初に PlayerMoveEvent を出すとき、前に送られた向き（直す前の値）と今の向き（直した値）が
-// 違うと、その向きのパケットを捨てる（実地テストで、180 を送ったあとの -90 が捨てられた。reports/ の記録を見よ）。
-func wrapDegrees(a float32) float32 {
-	f := float32(math.Mod(float64(a), 360))
-	if f >= 180 {
-		f -= 360
-	}
-	if f < -180 {
-		f += 360
-	}
-	return f
+	cl.lookAtLocked(cl.eyeLocked(), p)
 }
 
 // faceCenter はブロック p の面 f の真ん中の位置を返す。

@@ -214,7 +214,9 @@ func (cl *Client) entOnSpawn(d *protocol.Decoder) error {
 	es := entityKey.of(cl)
 	es.mu.Lock()
 	es.ents[p.EntityID] = e
+	snap := es.snapshotLocked(e)
 	es.mu.Unlock()
+	cl.emit(EntitySpawnEvent{eventBase: evNow(), Entity: snap}) // events.go
 	return nil
 }
 
@@ -225,10 +227,17 @@ func (cl *Client) entOnRemove(d *protocol.Decoder) error {
 	}
 	es := entityKey.of(cl)
 	es.mu.Lock()
+	removed := make([]Entity, 0, len(ids))
 	for _, id := range ids {
+		if e, ok := es.ents[id]; ok {
+			removed = append(removed, es.snapshotLocked(e))
+		}
 		delete(es.ents, id)
 	}
 	es.mu.Unlock()
+	for _, e := range removed {
+		cl.emit(EntityRemoveEvent{eventBase: evNow(), Entity: e}) // events.go
+	}
 	return nil
 }
 

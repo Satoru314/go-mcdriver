@@ -799,3 +799,19 @@ func TestUseItemSlowsMovement(t *testing.T) {
 		t.Error("手に持つ物が変わったのに使っている")
 	}
 }
+
+// 行動の目の位置（届く距離と向き）は姿勢の目の高さを使うこと（しゃがむと 1.27、泳ぐと 0.4）。
+func TestEyeFollowsPose(t *testing.T) {
+	cl := &Client{}
+	cl.initFeatures()
+	cl.y = 10
+	for _, tc := range []struct {
+		pose Pose
+		want float64
+	}{{PoseStanding, 1.62}, {PoseCrouching, 1.27}, {PoseSwimming, 0.4}} {
+		moveKey.of(cl).p.Pose = tc.pose
+		if got := cl.eyeLocked().Y - 10; math.Abs(got-tc.want) > 1e-6 {
+			t.Errorf("姿勢 %v の目の高さ %v、期待 %v", tc.pose, got, tc.want)
+		}
+	}
+}

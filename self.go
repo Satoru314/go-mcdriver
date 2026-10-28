@@ -24,6 +24,7 @@ import (
 // GameMode はゲームモード。
 type GameMode uint8
 
+// ゲームモードの値（Login (play) や Game Event で届く番号と同じ）。
 const (
 	Survival  GameMode = 0
 	Creative  GameMode = 1
@@ -185,20 +186,20 @@ func (cl *Client) Respawn() error {
 	}
 	select {
 	case <-cl.done:
-		return fmt.Errorf("mcdriver: リスポーン: 接続が終わっている: %w", cl.Err())
+		return fmt.Errorf("mcdriver: リスポーン: %w", cl.closedErr())
 	default:
 	}
 	// 段階の切り替えと順番を保つため、cl.mu を持って送る
 	cl.mu.Lock()
 	defer cl.mu.Unlock()
 	if cl.state != data.StatePlay {
-		return errors.New("mcdriver: リスポーン: 設定の段階なので送れない")
+		return fmt.Errorf("mcdriver: リスポーン: %w", ErrNotPlaying)
 	}
 	if err := cl.c.Send(data.PlayServerboundClientCommand, func(e *protocol.Encoder) error {
 		e.WriteVarInt(packets.ClientCommandRespawn)
 		return nil
 	}); err != nil {
-		return fmt.Errorf("mcdriver: リスポーン: %w", err)
+		return fmt.Errorf("mcdriver: リスポーン: %w", cl.sendErr(err))
 	}
 	return nil
 }

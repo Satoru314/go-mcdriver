@@ -598,3 +598,31 @@ func TestGeom(t *testing.T) {
 		t.Error("Offset / Center")
 	}
 }
+
+// チャンクの端のブロックが変わっても、読み込んでいない隣のチャンクには明るさの「古い」の印を付けないこと
+// （付けると、読み込まれないまま離れたときに印が残り、長く動かすと増え続ける）。
+func TestStaleLightOnlyLoadedColumns(t *testing.T) {
+	s, c := playClientCfg(t, Config{})
+	s.sendChunks(flatColumn(t))
+	// チャンク (0, 0) の北西の角。隣の (-1, *) と (*, -1) は読み込んでいない
+	s.sendBlockUpdate(BlockPos{X: 0, Y: -60, Z: 0}, stateOf(t, "stone"))
+	for end := time.Now().Add(2 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		if st, ok := c.Block(BlockPos{X: 0, Y: -60, Z: 0}); ok && st.Block.Name == "stone" {
+			break
+		}
+		if time.Now().After(end) {
+			t.Fatal("ブロックの変化が届かない")
+		}
+	}
+	ws := worldKey.of(c)
+	ws.mu.RLock()
+	defer ws.mu.RUnlock()
+	if len(ws.staleLight) == 0 {
+		t.Fatal("印が 1 つも無い")
+	}
+	for sp := range ws.staleLight {
+		if sp.X != 0 || sp.Z != 0 {
+			t.Errorf("読み込んでいないチャンクのセクション %+v に印がある", sp)
+		}
+	}
+}

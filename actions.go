@@ -975,10 +975,11 @@ func waterAmount(s data.BlockState) (int, bool) {
 // PlaceOpts は Place の指定。
 type PlaceOpts struct {
 	// Yaw は置く瞬間に向く横の向き（度。0 が南、90 が西、180 が北、-90 が東）。階段やドアなど、
-	// 置く人の向きで向きが決まるブロックに効く。nil なら指す位置を向いたまま
+	// 置く人の向きで向きが決まるブロックに効く。nil なら指す位置を向いたまま。NaN か無限大なら ErrNotFinite
 	Yaw *float64
 	// Cursor は面の上の指す位置（against の北西の下の角から、x, y, z それぞれ 0〜1）。
-	// 階段やハーフブロックの上下（横の面の上半分を指すと上付き）に効く。nil なら面の真ん中
+	// 階段やハーフブロックの上下（横の面の上半分を指すと上付き）に効く。nil なら面の真ん中。
+	// NaN か無限大なら ErrNotFinite、0〜1 の外ならエラー
 	Cursor *r3.Vec
 }
 
@@ -1000,6 +1001,10 @@ type Placed struct {
 func (cl *Client) Place(ctx context.Context, against BlockPos, f Face, opt PlaceOpts) (Placed, error) {
 	var yaw *float32
 	if opt.Yaw != nil {
+		// float32 にすると無限大になる大きすぎる値も同じく扱う
+		if !finite(*opt.Yaw, float64(float32(*opt.Yaw))) {
+			return Placed{}, fmt.Errorf("%w: PlaceOpts.Yaw %v", ErrNotFinite, *opt.Yaw)
+		}
 		y := float32(*opt.Yaw)
 		yaw = &y
 	}
@@ -1083,6 +1088,9 @@ func (cl *Client) useOn(ctx context.Context, against BlockPos, f Face, cursor *r
 	c := r3.Add(r3.Vec{X: 0.5, Y: 0.5, Z: 0.5}, r3.Scale(0.5, f.Normal()))
 	if cursor != nil {
 		c = *cursor
+		if !finite(c.X, c.Y, c.Z) {
+			return before, fmt.Errorf("%w: Cursor %v", ErrNotFinite, c)
+		}
 		if c.X < 0 || c.X > 1 || c.Y < 0 || c.Y > 1 || c.Z < 0 || c.Z > 1 {
 			return before, fmt.Errorf("mcdriver: Cursor %v はブロックの外（0〜1）", c)
 		}

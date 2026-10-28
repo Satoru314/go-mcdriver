@@ -12,6 +12,7 @@ package mcdriver
 //     どちらも無く接地か横の衝突が変わっていれば Status Only。何も変わらなければ送らない
 
 import (
+	"errors"
 	"fmt"
 	"math"
 
@@ -102,22 +103,49 @@ func (cl *Client) Controls() Controls {
 	return moveKey.of(cl).ctl
 }
 
+// ErrNotFinite は、向きや位置に NaN（数でない値）か無限大を渡したときのエラー。
+// そのときは何も変えず、何も送らない（前の向きのまま）。
+//
+// 黙って無視せずにエラーにするのは、使う側の計算の誤り（0 で割った など）に気づけるようにするため。
+// NaN の向きをそのまま送ると、サーバー（本家・Paper）は「正しくない動き」として接続を切る。
+var ErrNotFinite = errors.New("mcdriver: NaN か無限大の値")
+
+// finite は v がどれも NaN でも無限大でもないかを返す。
+func finite(v ...float64) bool {
+	for _, x := range v {
+		if math.IsNaN(x) || math.IsInf(x, 0) {
+			return false
+		}
+	}
+	return true
+}
+
 // Look は向きを変える（度）。yaw は 0 が南（+z）、90 が西（-x）、-90 が東（+x）、180 が北（-z）。
 // yaw は -180 以上 180 未満に直して持ち、送る（wrapDegrees）。
 // pitch は 0 が水平、90 が真下、-90 が真上（-90〜90 に収める）。次のティックでサーバーに送る。
-func (cl *Client) Look(yaw, pitch float32) {
+// yaw か pitch が NaN か無限大なら、向きを変えずに ErrNotFinite を返す。
+func (cl *Client) Look(yaw, pitch float32) error {
+	if !finite(float64(yaw), float64(pitch)) {
+		return fmt.Errorf("%w: Look(%v, %v)", ErrNotFinite, yaw, pitch)
+	}
 	cl.mu.Lock()
 	defer cl.mu.Unlock()
 	cl.yaw = wrapDegrees(yaw)
 	cl.pitch = max(-90, min(90, pitch))
+	return nil
 }
 
 // LookAt は目の位置から p を向く。目の高さは姿勢で変わる（立って 1.62、しゃがんで 1.27、泳いで 0.4）。
-func (cl *Client) LookAt(p r3.Vec) {
+// p が目の位置と同じなら向きを変えない。p に NaN か無限大があれば、向きを変えずに ErrNotFinite を返す。
+func (cl *Client) LookAt(p r3.Vec) error {
+	if !finite(p.X, p.Y, p.Z) {
+		return fmt.Errorf("%w: LookAt(%v)", ErrNotFinite, p)
+	}
 	cl.mu.Lock()
 	defer cl.mu.Unlock()
 	eye := r3.Vec{X: cl.x, Y: cl.y + float64(moveKey.of(cl).p.EyeHeight()), Z: cl.z}
 	cl.lookAtLocked(eye, p)
+	return nil
 }
 
 // lookAtLocked は eye から p を向く（LookAt と、行動の前に向く actions.go の aimLocked が使う）。

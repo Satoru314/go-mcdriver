@@ -81,6 +81,7 @@ func main() {
 ### エラー
 
 - 行動の失敗は `errors.Is` で見分けられる値を包んで返す（`ErrOutOfReach`、`ErrNotLoaded`、`ErrNotPlaced`、`ErrClickRejected` など。`go doc` を見よ）
+- 向きや位置（`Look`、`LookAt`、`PlaceOpts` の `Yaw` と `Cursor`）に NaN か無限大を渡すと `ErrNotFinite`。何も変えず、何も送らない
 - 設定の段階に戻っているあいだ（サーバーの切り替えなど）に送る操作は `ErrNotPlaying`
 - 切断したあとに呼んだ操作は、切断の理由（`Err()`）を包んだエラーを返す。`Close` で閉じたなら `errors.Is(err, mcdriver.ErrClosed)` が真
 - 受け取ったパケットの処理や毎ティックの処理が panic したら（ドライバの不具合）、接続を切り、`Err()` は `ErrInternal` を包んだエラー（呼び出しの記録つき）になる。プロセスは落ちない

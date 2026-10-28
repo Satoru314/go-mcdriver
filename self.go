@@ -24,6 +24,7 @@ import (
 // GameMode はゲームモード。
 type GameMode uint8
 
+// ゲームモードの値（Login (play) や Game Event で届く番号と同じ）。
 const (
 	Survival  GameMode = 0
 	Creative  GameMode = 1

@@ -6,6 +6,7 @@ package mcdriver
 import (
 	"context"
 	"errors"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -155,14 +156,15 @@ func TestConcurrentUseAndClose(t *testing.T) {
 				"ClickSlot": func() error { return c.ClickSlot(context.Background(), 36, 0, ClickPickup) },
 				"Attack":    func() error { return c.Attack(100) },
 			}
-			actErr := make(chan error, 100)
 			for _, f := range acts {
 				uw.Add(1)
 				go func() {
 					defer uw.Done()
 					for ctx.Err() == nil {
 						if err := f(); err != nil {
-							actErr <- err
+							if errors.Is(err, ErrInternal) {
+								t.Errorf("panic: %v", err)
+							}
 							select {
 							case <-c.Done():
 								return
@@ -192,7 +194,8 @@ func TestConcurrentUseAndClose(t *testing.T) {
 			select {
 			case <-uwDone:
 			case <-time.After(10 * time.Second):
-				t.Fatal("切断のあとも戻らない行動がある")
+				buf := make([]byte, 1<<20)
+				t.Fatalf("切断のあとも戻らない行動がある:\n%s", buf[:runtime.Stack(buf, true)])
 			}
 			close(stop)
 			s.nc.Close()
@@ -210,12 +213,6 @@ func TestConcurrentUseAndClose(t *testing.T) {
 			}
 			if !closeByServer && !errors.Is(c.Err(), ErrClosed) {
 				t.Errorf("Err = %v、期待 ErrClosed", c.Err())
-			}
-			close(actErr)
-			for err := range actErr {
-				if errors.Is(err, ErrInternal) {
-					t.Errorf("panic: %v", err)
-				}
 			}
 		})
 	}

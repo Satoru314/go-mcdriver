@@ -3,6 +3,8 @@ package mcdriver
 import (
 	"context"
 	"errors"
+	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -324,5 +326,73 @@ func TestConnectBadConfig(t *testing.T) {
 	h, p, err = splitAddr("[::1]:25570")
 	if err != nil || h != "::1" || p != 25570 {
 		t.Errorf("splitAddr([::1]:25570) = %q %d %v", h, p, err)
+	}
+}
+
+// 同じプロセスで Connect と Close を何度も繰り返しても、goroutine とヒープが増えていかないこと。
+// サーバーに切られる終わり方と、Close で閉じる終わり方を交互に行う。
+func TestConnectRepeatNoLeak(t *testing.T) {
+	once := func(i int) {
+		s := newFakeServer(t)
+		name := fmt.Sprintf("leak%d", i)
+		ch := connectAsync(context.Background(), Config{Addr: s.addr(), Username: name})
+		s.login(name, 256)
+		s.configure(true)
+		s.enterPlay()
+		var r connectResult
+		select {
+		case r = <-ch:
+		case <-time.After(5 * time.Second):
+			t.Fatal("Connect が戻らない")
+		}
+		if r.err != nil {
+			t.Fatal(r.err)
+		}
+		c := r.c
+		if i%2 == 0 {
+			s.nc.Close() // サーバーが切る
+			select {
+			case <-c.Done():
+			case <-time.After(5 * time.Second):
+				t.Fatal("サーバーが切っても Done が閉じない")
+			}
+		}
+		c.Close()
+		c.Close()
+		for range c.Events() {
+		}
+		s.ln.Close()
+		s.nc.Close()
+	}
+	measure := func() (int, uint64) {
+		runtime.GC()
+		runtime.GC()
+		var m runtime.MemStats
+		runtime.ReadMemStats(&m)
+		return runtime.NumGoroutine(), m.HeapAlloc
+	}
+	for i := range 20 {
+		once(i)
+	}
+	g0, h0 := measure()
+	for i := range 200 {
+		once(100 + i)
+	}
+	// 終わった goroutine が片付くまで少し待つ
+	var g1 int
+	var h1 uint64
+	for range 50 {
+		if g1, h1 = measure(); g1 <= g0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Logf("goroutine %d → %d、ヒープ %d KB → %d KB", g0, g1, h0/1024, h1/1024)
+	if g1 > g0 {
+		buf := make([]byte, 1<<20)
+		t.Fatalf("goroutine が %d から %d に増えた:\n%s", g0, g1, buf[:runtime.Stack(buf, true)])
+	}
+	if h1 > h0+8<<20 {
+		t.Errorf("ヒープが %d KB から %d KB に増えた", h0/1024, h1/1024)
 	}
 }

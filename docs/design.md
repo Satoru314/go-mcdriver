@@ -58,7 +58,8 @@ Minecraft Java Edition 1.21.4 に、bot をユーザーとしてログインさ�
 
 ```
 go-mcdriver/
-├── client.go        Connect, Close, Done, Err, Config。毎ティックの処理の本体
+├── client.go        Connect, Close, Done, Err, Config。毎ティックの処理の本体と、接続そのものに関わるパケットの処理
+├── handlers.go      受け取るパケットの振り分けの土台（onPlay で処理を登録、newFeature で機能ごとの状態を足す）
 ├── geom.go          BlockPos（整数の座標）, Face（6方向）
 ├── self.go          Self（位置, 速度, 向き, 接地, HP, 満腹度, 経験値, 死亡）
 ├── world.go         Block, Light, WorldView（地形を読む）
@@ -76,13 +77,20 @@ go-mcdriver/
 │   ├── nbt/         NBT の読み込み
 │   ├── chunk/       チャンクの展開（ブロックの並び, 明るさ）
 │   ├── physics/     プレイヤーの物理, 当たり判定
-│   └── state/       受け取った状態の保管（鍵をかけて、写しを返す）
+│   ├── rcon/        RCON のクライアント（テストの準備と確認に使う）
+│   └── testserver/  テスト用サーバー（Docker の Paper）を立てて繋ぐ
 └── cmd/
     ├── gendata/     サーバーの jar から公式データを書き出し、data/*_gen.go を作る
     └── mcprobe/     接続して状態を表示するだけの確認用ツール
 ```
 
 依存の向き: `protocol` はゲームのことを知らない。`physics` は `data` と `chunk` を使う。ルートのパッケージはそれらを組み合わせて外に見せる。
+
+受け取った状態は、ルートのパッケージの機能ごとのファイル（`world.go`、`self.go`、`entities.go`、`inventory.go`、`time.go`、`events.go`、`actions.go` など）がそれぞれ持つ。
+
+- 各ファイルは自分の状態の構造体を `newFeature` で登録し（Client ごとに 1 つ作られる）、受け取るパケットの処理を `init` で `onPlay` に登録する（`handlers.go`）。`client.go` を触らずに機能を足せる
+- 受信の goroutine は 1 つで、`client.go` の接続そのものに関わる処理のあと、パケット ID ごとに登録した処理を順に呼ぶ
+- 状態はファイルごとの鍵（自分の鍵を持たないものは Client の鍵）で守り、読む関数は写しを返す。鍵は `defer` で外し、重い処理（チャンクの展開など）は鍵の外で行う
 
 ## テスト
 

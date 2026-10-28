@@ -1,7 +1,12 @@
 // Package mcdriver は Minecraft Java Edition 1.21.4 に bot をログインさせ、
 // ゲームの情報を受け取り、行動を指示するためのドライバ。
 //
-// ログインと接続の維持、地形（Block, Light, WorldView）の受け取り、物理と移動（SetControls, Look, LookAt）ができる。
+// ログインと接続の維持、自分の体（Self, Respawn）、地形（Block, Light, WorldView）、生き物（Entities）、
+// 持ち物と容器（Inventory, Container, ClickSlot）、物理と移動（SetControls, Look, LookAt）、
+// 行動（Dig, Place, UseBlock, StartUseItem, Attack）、出来事（Events）、時刻と天気（Time, Weather）を扱う。
+//
+// 状態を読む関数は呼んだ時点の写しを返し、どれも複数の goroutine から同時に呼べる。
+// 時間のかかる行動は context.Context を受け取り、時間切れ・中止・切断で必ず戻る。
 //
 //	c, err := mcdriver.Connect(ctx, mcdriver.Config{Addr: "localhost:25565", Username: "bot1"})
 //	if err != nil { ... }

@@ -225,6 +225,7 @@ func (cl *Client) moveTickLocked() error {
 	in := physics.Input{
 		Forward: ms.ctl.Forward, Back: ms.ctl.Back, Left: ms.ctl.Left, Right: ms.ctl.Right,
 		Jump: ms.ctl.Jump, Sprint: ms.ctl.Sprint, Sneak: ms.ctl.Sneak,
+		UsingItem: cl.usingItemLocked(), // アイテムを使っているあいだは 0.2 倍（actions.go の StartUseItem）
 	}
 	// 満腹度と飛べるか（走れるかに効く）。Set Health がまだ届いていない（HP も満腹度も 0）なら、本家の初めの値 20 とする
 	ss := selfKey.of(cl)

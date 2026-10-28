@@ -644,3 +644,158 @@ func TestWrapDegrees(t *testing.T) {
 		}
 	}
 }
+
+// startsUsing: 本家のクライアントが Use Item で使い始める物か。
+func TestStartsUsing(t *testing.T) {
+	item := func(name string) *data.Item {
+		it, ok := data.ItemByName(name)
+		if !ok {
+			t.Fatalf("アイテム %s が無い", name)
+		}
+		return it
+	}
+	hungry := Self{Food: 10}
+	full := Self{Food: 20}
+	creativeFull := Self{Food: 20, GameMode: Creative}
+	for _, tc := range []struct {
+		held     *data.Item
+		self     Self
+		hasArrow bool
+		want     bool
+	}{
+		{nil, hungry, false, false},
+		{item("stone"), hungry, false, false},
+		{item("apple"), hungry, false, true},
+		{item("apple"), full, false, false},        // 満腹では食べられない
+		{item("apple"), creativeFull, false, true}, // クリエイティブは満腹でも
+		{item("golden_apple"), full, false, true},  // いつでも食べられる
+		{item("potion"), full, false, true},        // 飲み物
+		{item("milk_bucket"), full, false, true},
+		{item("bow"), hungry, false, false}, // 矢が無い
+		{item("bow"), hungry, true, true},
+		{item("bow"), Self{GameMode: Creative}, false, true},
+		{item("shield"), hungry, false, true},
+		{item("spyglass"), hungry, false, true},
+		{item("crossbow"), hungry, true, false}, // 弾を込めたかが分からないので、サーバーの印に任せる
+	} {
+		if got := startsUsing(tc.held, tc.self, tc.hasArrow); got != tc.want {
+			name := "素手"
+			if tc.held != nil {
+				name = tc.held.Name
+			}
+			t.Errorf("startsUsing(%s, 満腹度 %d, モード %v, 矢 %v) = %v、期待 %v", name, tc.self.Food, tc.self.GameMode, tc.hasArrow, got, tc.want)
+		}
+	}
+}
+
+// アイテムを使っているあいだは物理の Input.UsingItem が立ち、歩く速さが 0.2 倍になる。
+// 使い始め: StartUseItem（使える物のとき）とサーバーの印。やめ: サーバーの印が消える、StopUseItem、
+// 手に持つ物が変わる、サーバーの印が useConfirmTicks のあいだ届かない。
+func TestUseItemSlowsMovement(t *testing.T) {
+	s, c := actClient(t)
+	startInventory(t, s, 1, map[int]packets.Slot{
+		SlotHotbar:     plainSlot(t, "apple", 5),
+		SlotHotbar + 1: plainSlot(t, "stone", 5),
+	})
+	// このテストで送るパケット（Use Item など）は読み飛ばして、Pong を待つ
+	skip := map[int32]bool{data.PlayServerboundUseItem: true, data.PlayServerboundPlayerAction: true, data.PlayServerboundSetCarriedItem: true}
+	for id := range tickPackets {
+		skip[id] = true
+	}
+	sync := func() {
+		t.Helper()
+		s.send(data.PlayClientboundPing, func(e *protocol.Encoder) { e.WriteInt(1) })
+		s.expect(data.PlayServerboundPong, skip)
+	}
+	using := func() bool {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return c.usingItemLocked()
+	}
+	// 自分の LivingEntity の印（番号 8、Byte）を送る
+	sendUsing := func(on bool) {
+		var v uint8
+		if on {
+			v = 0x01
+		}
+		s.send(data.PlayClientboundSetEntityData, func(e *protocol.Encoder) {
+			e.WriteVarInt(testLoginPlay.EntityID)
+			e.WriteUByte(metaIndexLivingFlags)
+			e.WriteVarInt(packets.MetaByte)
+			e.WriteUByte(v)
+			packets.WriteMetadataEnd(e)
+		})
+		sync()
+	}
+	// 東へ歩いて、0.6 秒後の横の速さ（ブロック/ティック）を測る
+	walk := func() float64 {
+		c.Look(-90, 0)
+		c.SetControls(Controls{Forward: true})
+		time.Sleep(600 * time.Millisecond)
+		sync()
+		v := c.Self().Vel
+		c.SetControls(Controls{})
+		time.Sleep(300 * time.Millisecond)
+		sync()
+		return math.Hypot(v.X, v.Z)
+	}
+
+	// 満腹度が届いていない（20 とみなさない。Set Health の前は 0）のでリンゴは食べられる → 使い始める
+	must(t, c.StartUseItem())
+	if !using() {
+		t.Fatal("StartUseItem のあと使っていない")
+	}
+	sendUsing(true)
+	slow := walk()
+	if !using() {
+		t.Fatal("サーバーの印があるのに、歩いているあいだにやめた")
+	}
+	sendUsing(false) // 食べ終わり
+	if using() {
+		t.Fatal("サーバーの印が消えたのに使っている")
+	}
+	normal := walk()
+	t.Logf("使っているとき %.4f、いないとき %.4f（ブロック/ティック）", slow, normal)
+	// Vel は摩擦をかけたあとの値（歩いて約 0.118）
+	if normal < 0.1 || math.Abs(slow/normal-0.2) > 0.03 {
+		t.Errorf("使っているときの速さ %.4f が、いないとき %.4f の 0.2 倍でない", slow, normal)
+	}
+
+	// StopUseItem でやめる
+	must(t, c.StartUseItem())
+	sendUsing(true)
+	must(t, c.StopUseItem())
+	if using() {
+		t.Error("StopUseItem のあと使っている")
+	}
+	sendUsing(false)
+
+	// サーバーの印が届かなければ（サーバーが使わせなかった）、useConfirmTicks のあとやめる
+	must(t, c.StartUseItem())
+	time.Sleep(time.Duration(useConfirmTicks+6) * TickInterval)
+	if using() {
+		t.Error("サーバーの印が届かないのに使い続けている")
+	}
+
+	// 使えない物（石）では使い始めない
+	must(t, c.SelectHotbar(1))
+	sync()
+	time.Sleep(3 * TickInterval)
+	must(t, c.StartUseItem())
+	if using() {
+		t.Error("石で使い始めた")
+	}
+
+	// サーバーの印だけで使い始め、手に持つ物が変わったらやめる
+	must(t, c.SelectHotbar(0))
+	time.Sleep(3 * TickInterval)
+	sendUsing(true)
+	if !using() {
+		t.Fatal("サーバーの印で使い始めない")
+	}
+	must(t, c.SelectHotbar(1))
+	time.Sleep(3 * TickInterval)
+	if using() {
+		t.Error("手に持つ物が変わったのに使っている")
+	}
+}

@@ -3,12 +3,21 @@
 // 本家の LocalPlayer.aiStep → LivingEntity.aiStep → LivingEntity.travel → Entity.move の流れを、
 // 1 ティックずつ同じ順番でなぞる。値は本家に合わせて float（float32）で計算するところは float32 にしている。
 //
-// 扱うもの: 当たり判定（幅 0.6、高さ 1.8）、重力と空気抵抗、地面の滑りやすさ、歩く・走る、ジャンプ（走りジャンプ）、
-// 段差の自動の上り（0.6）、ブロックとの衝突、水と溶岩の中の動き、梯子・つる、スライムとベッドの跳ね返り、
-// ソウルサンドとハチミツブロックの遅さ。
+// 1 ティックの順番（本家のクライアントの LocalPlayer.tick）:
+//  1. Entity.baseTick: 水と溶岩に触れているかと流れに押される力（updateFluidHeightAndDoFluidPushing）、
+//     目が水の中か（updateFluidOnEyes）、泳いでいるか（updateSwimming）
+//  2. LocalPlayer.aiStep: しゃがみ、入力、走り始め・走りやめ、水の中でしゃがむと沈む
+//  3. LivingEntity.aiStep: ジャンプ、移動（travel）、中に入ったブロックの効果（applyEffectsFromBlocks）
+//  4. Player.tick の終わり: 姿勢（立つ・しゃがむ・泳ぐ）を決め、当たり判定の大きさを変える（updatePlayerPose）
 //
-// 扱わないもの: しゃがみ、泳ぎの姿勢（水中の走り）、飛行、エリトラ、乗り物、ステータス効果、エンチャント、
-// 水の流れに押される力、クモの巣・甘い実の茂み・粉雪、足場（scaffolding）の特別な当たり判定、ほかのエンティティとの衝突。
+// 扱うもの: 当たり判定（立って 0.6×1.8、しゃがんで 0.6×1.5、泳いで 0.6×0.6）、重力と空気抵抗、地面の滑りやすさ、
+// 歩く・走る（満腹度 6 以下では走り始められない）、ジャンプ（走りジャンプ）、段差の自動の上り（0.6）、ブロックとの衝突、
+// 水と溶岩の中の動きと流れに押される力、泳ぎ、梯子・つる・足場、スライムとベッドの跳ね返り、ソウルサンドとハチミツブロックの遅さ、
+// しゃがみ（遅さ 0.3 倍、端から落ちない）、クモの巣・甘い実の茂み・粉雪・泡の柱。
+//
+// 扱わないもの: 飛行、エリトラ、乗り物、ステータス効果、エンチャント（水中歩行など）、革のブーツで粉雪の上を歩く、
+// ハチミツブロックの壁で滑り落ちる、ほかのエンティティとの衝突、ブロックに埋まったときに押し出される動き（moveTowardsClosestSpace）、
+// 前を 2 回押して走る操作。
 package physics
 
 import (
@@ -60,8 +69,9 @@ const (
 	FluidAccel float32 = 0.02
 	// FluidVerticalDrag は液体の中で y の速さに掛ける値（travelInFluid の 0.8F）
 	FluidVerticalDrag float32 = 0.8
-	// FluidJump は液体の中でジャンプしたときに足す上向きの速さ（LivingEntity.jumpInLiquid の 0.04）
-	FluidJump = 0.04
+	// FluidJump は液体の中でジャンプしたときに足す上向きの速さ（LivingEntity.jumpInLiquid の 0.04F）。
+	// 水の中でしゃがむと同じだけ下に足す（LivingEntity.goDownInWater の -0.04F）
+	FluidJump float32 = 0.04
 	// FluidJumpThreshold は液体から地面のジャンプに切り替わる液体の深さ（LivingEntity.getFluidJumpThreshold = 0.4）
 	FluidJumpThreshold = 0.4
 	// FluidClimbOut は液体の中で壁にぶつかったとき、上に出られるなら y に入れる速さ（travelInFluid の 0.3F）
@@ -73,7 +83,63 @@ const (
 	ClimbMaxSpeed float32 = 0.15
 	// ClimbUpSpeed は梯子の上で前に押しているかジャンプしているときの上向きの速さ（0.2）
 	ClimbUpSpeed = 0.2
+
+	// SneakSpeed はしゃがんでいるときに入力に掛ける値（Attributes.SNEAKING_SPEED の既定 0.3）
+	SneakSpeed float32 = 0.3
+	// UseItemSpeed はアイテムを使っているときに入力に掛ける値（LocalPlayer.aiStep の 0.2F）
+	UseItemSpeed float32 = 0.2
+	// SprintFood は走り始められる満腹度の下限（LocalPlayer.hasEnoughFoodToStartSprinting: 6 より大きい）
+	SprintFood = 6
+	// WaterFlowScale と LavaFlowScale は流れに押される力の大きさ（Entity.updateInWaterStateAndDoFluidPushing）。
+	// 溶岩はネザー（ultraWarm）なら LavaFlowScaleUltraWarm
+	WaterFlowScale         = 0.014
+	LavaFlowScale          = 0.0023333333333333335
+	LavaFlowScaleUltraWarm = 0.007
 )
+
+// Pose はプレイヤーの姿勢（本家の Pose のうち、このパッケージで扱うもの）。姿勢で当たり判定の高さと目の高さが変わる。
+type Pose uint8
+
+const (
+	// PoseStanding は立っている（0.6×1.8、目 1.62）
+	PoseStanding Pose = iota
+	// PoseCrouching はしゃがんでいる（0.6×1.5、目 1.27）
+	PoseCrouching
+	// PoseSwimming は泳いでいる・這っている（0.6×0.6、目 0.4）
+	PoseSwimming
+)
+
+// Height は当たり判定の高さ（Player.POSES）。
+func (q Pose) Height() float32 {
+	switch q {
+	case PoseCrouching:
+		return 1.5
+	case PoseSwimming:
+		return 0.6
+	}
+	return PlayerHeight
+}
+
+// EyeHeight は目の高さ（Player.POSES）。
+func (q Pose) EyeHeight() float32 {
+	switch q {
+	case PoseCrouching:
+		return 1.27
+	case PoseSwimming:
+		return 0.4
+	}
+	return EyeHeight
+}
+
+func (q Pose) String() string {
+	switch q {
+	case PoseCrouching:
+		return "crouching"
+	case PoseSwimming:
+		return "swimming"
+	}
+	return "standing"
+}
 
 // World はブロックを読むための口。
 type World interface {
@@ -85,6 +151,10 @@ type World interface {
 // Input は 1 ティックの入力（キー）。
 type Input struct {
 	Forward, Back, Left, Right, Jump, Sprint bool
+	// Sneak はしゃがむキー（本家の shift）
+	Sneak bool
+	// UsingItem はアイテムを使っている（食べている、弓を引いている など）。遅くなり、走れない
+	UsingItem bool
 }
 
 // BlockPos は整数の座標（このパッケージの中で使う）。
@@ -107,10 +177,32 @@ type Player struct {
 	VerticalCollision bool
 	// Sprinting は走っているか
 	Sprinting bool
+	// Swimming は泳いでいるか（本家の isSwimming。水の中で走ると泳ぐ）
+	Swimming bool
+	// Crouching はしゃがんでいるか（本家の LocalPlayer.crouching。遅くなる）
+	Crouching bool
+	// Sneaking はしゃがむキーを押しているか（本家の isShiftKeyDown。端から落ちない）
+	Sneaking bool
+	// Pose は姿勢。当たり判定の高さが変わる
+	Pose Pose
 
 	// InWater と InLava は液体に触れているか。WaterHeight と LavaHeight は足元からの液体の深さ
 	InWater, InLava         bool
 	WaterHeight, LavaHeight float64
+	// EyeInWater は目が水の中か（本家の fluidOnEyes に水がある）
+	EyeInWater bool
+
+	// Food は満腹度（0〜20）。SprintFood 以下なら走り始められず、走っていてもやめる。呼ぶ側が毎ティック入れる
+	Food int
+	// MayFly は飛べる（クリエイティブなど）。満腹度に関わらず走れる
+	MayFly bool
+	// UltraWarm はネザーのように水が蒸発するディメンションか（溶岩の流れが強い）
+	UltraWarm bool
+
+	// wasEyeInWater は前のティックの EyeInWater（本家の wasEyeInWater。isUnderWater に使う）
+	wasEyeInWater bool
+	// stuck は次の移動に掛ける倍率（本家の stuckSpeedMultiplier。クモの巣など）。ゼロなら無し
+	stuck r3.Vec
 
 	jumping     bool
 	noJumpDelay int
@@ -134,8 +226,28 @@ func BoxAt(pos r3.Vec) r3.Box {
 	}
 }
 
-// Box は今の当たり判定の箱を返す。
-func (p *Player) Box() r3.Box { return BoxAt(p.Pos) }
+// PoseBoxAt は足元の中心が pos で姿勢が q のときの当たり判定の箱を返す。
+func PoseBoxAt(pos r3.Vec, q Pose) r3.Box {
+	h := HalfWidth
+	return r3.Box{
+		Min: r3.Vec{X: pos.X - h, Y: pos.Y, Z: pos.Z - h},
+		Max: r3.Vec{X: pos.X + h, Y: pos.Y + float64(q.Height()), Z: pos.Z + h},
+	}
+}
+
+// Box は今の当たり判定の箱を返す（姿勢で高さが変わる）。
+func (p *Player) Box() r3.Box { return PoseBoxAt(p.Pos, p.Pose) }
+
+// EyeHeight は今の目の高さ（足元から）を返す。
+func (p *Player) EyeHeight() float32 { return p.Pose.EyeHeight() }
+
+// ctx は今の自分から見た当たり判定の文脈（本家の CollisionContext.of(entity)）。
+func (p *Player) ctx() collisionContext {
+	return collisionContext{bottom: p.Pos.Y, descending: p.Sneaking}
+}
+
+// UnderWater は水の中に体があり、前のティックで目が水の中だったか（本家の Entity.isUnderWater）。
+func (p *Player) UnderWater() bool { return p.wasEyeInWater && p.InWater }
 
 // Loaded は p の周り（当たり判定の範囲と、その 2 ブロック外まで）のチャンクが読み込まれていれば true を返す。
 func Loaded(w World, pos r3.Vec) bool {
@@ -168,34 +280,75 @@ func (p *Player) Tick(w World, in Input) bool {
 	if !Loaded(w, p.Pos) {
 		return false
 	}
-	// Entity.baseTick: 液体に触れているか
-	p.updateFluids(w)
 
-	// LocalPlayer.aiStep: 走るかどうか
+	// Entity.baseTick: 液体に触れているかと流れに押される力、目が水の中か、泳いでいるか
+	p.updateFluids(w)
+	p.updateFluidOnEyes(w)
+	p.updateSwimming(w)
+
+	// LocalPlayer.aiStep
+	// しゃがんでいるかは、前のティックのキーで決める（本家は input.tick の前に isShiftKeyDown を読む）
+	p.Crouching = !p.Swimming && p.canFit(w, PoseCrouching) && (p.Sneaking || !p.canFit(w, PoseStanding))
+	// input.tick: ここから今のティックのキー
+	p.Sneaking = in.Sneak
 	forward := impulse(in.Forward, in.Back)
 	left := impulse(in.Left, in.Right)
-	// 本家と同じく、走り始める判定のあとに、やめる判定をする（壁に向かって押し続けても走らない）
-	if !p.Sprinting && in.Sprint && forward >= 0.8 && !p.InWater {
-		// 泳ぎの姿勢を扱わないので、水の中では走らない（本家は水中なら泳ぎになる）
+	movingSlowly := p.Crouching || p.Pose == PoseSwimming && !p.InWater
+	underWater := p.UnderWater()
+	// shouldStopSprinting（飛行・目つぶし・乗り物は扱わない）
+	if movingSlowly || in.UsingItem && !underWater {
+		p.Sprinting = false
+	}
+	if in.UsingItem {
+		left *= UseItemSpeed
+		forward *= UseItemSpeed
+	}
+	if movingSlowly {
+		left *= SneakSpeed
+		forward *= SneakSpeed
+	}
+	enoughFood := p.Food > SprintFood || p.MayFly
+	// canStartSprinting と hasEnoughImpulseToStartSprinting
+	enoughImpulse := forward >= 0.8
+	if underWater {
+		enoughImpulse = forward > 1e-5
+	}
+	canStart := !p.Sprinting && enoughImpulse && enoughFood && !in.UsingItem && (!movingSlowly || underWater)
+	if (!p.InWater || underWater) && canStart && in.Sprint {
 		p.Sprinting = true
 	}
 	if p.Sprinting {
-		// 前に押していない、正面から壁にぶつかった、水に入った、走るのをやめた、なら走るのをやめる
-		if !in.Sprint || forward <= 1e-5 || (p.HorizontalCollision && !p.MinorHorizontalCollision) || p.InWater {
+		noImpulse := !(forward > 1e-5) || !enoughFood
+		if p.Swimming {
+			if !p.OnGround && !in.Sneak && noImpulse || !p.InWater {
+				p.Sprinting = false
+			}
+		} else if noImpulse || p.HorizontalCollision && !p.MinorHorizontalCollision || p.InWater && !underWater {
 			p.Sprinting = false
 		}
+		// 本家は走るキーを離しても走り続けるが、このドライバは離したらやめる（Controls.Sprint の意味）
+		if !in.Sprint {
+			p.Sprinting = false
+		}
+	}
+	if p.InWater && in.Sneak {
+		// goDownInWater
+		p.Vel.Y += float64(-FluidJump)
 	}
 
 	// LivingEntity.aiStep
 	if p.noJumpDelay > 0 {
 		p.noJumpDelay--
 	}
-	// プレイヤーは横の速さが小さければ 0 にする（9.0E-6 = 0.003^2）
-	if horizontalDistSqr(p.Vel) < 9.0e-6 {
-		p.Vel.X, p.Vel.Z = 0, 0
+	// 小さな速さは 0 にする（軸ごとに 0.003 未満）
+	if math.Abs(p.Vel.X) < 0.003 {
+		p.Vel.X = 0
 	}
 	if math.Abs(p.Vel.Y) < 0.003 {
 		p.Vel.Y = 0
+	}
+	if math.Abs(p.Vel.Z) < 0.003 {
+		p.Vel.Z = 0
 	}
 	// LocalPlayer.serverAiStep
 	p.xxa, p.zza = left, forward
@@ -214,10 +367,10 @@ func (p *Player) Tick(w World, in Input) bool {
 					p.noJumpDelay = JumpDelay
 				}
 			} else {
-				p.Vel.Y += FluidJump
+				p.Vel.Y += float64(FluidJump)
 			}
 		} else {
-			p.Vel.Y += FluidJump
+			p.Vel.Y += float64(FluidJump)
 		}
 	} else {
 		p.noJumpDelay = 0
@@ -226,6 +379,10 @@ func (p *Player) Tick(w World, in Input) bool {
 	p.zza *= InputScale
 
 	p.travel(w, r3.Vec{X: float64(p.xxa), Z: float64(p.zza)})
+	p.applyEffectsFromBlocks(w)
+
+	// Player.tick の終わり
+	p.updatePose(w)
 	return true
 }
 
@@ -257,14 +414,25 @@ func (p *Player) jumpFromGround(w World) {
 	}
 	p.Vel.Y = math.Max(float64(f), p.Vel.Y)
 	if p.Sprinting {
-		r := float64(p.Yaw * (math.Pi / 180))
+		r := p.Yaw * (math.Pi / 180)
 		p.Vel.X += -float64(mthSin(r)) * SprintJumpBoost
 		p.Vel.Z += float64(mthCos(r)) * SprintJumpBoost
 	}
 }
 
-// travel は本家の LivingEntity.travel（液体の中か、それ以外か）。
+// travel は本家の Player.travel（泳いでいれば見ている向きに上下する）と LivingEntity.travel（液体の中か、それ以外か）。
 func (p *Player) travel(w World, input r3.Vec) {
+	if p.Swimming {
+		ly := p.lookY()
+		d1 := 0.06
+		if ly < -0.2 {
+			d1 = 0.085
+		}
+		// 水面の近く（頭の高さ y+0.9 に液体が無い）では、上を向いていてジャンプしていなければ浮き上がらない
+		if ly <= 0 || p.jumping || p.infoAt(w, BlockPos{floor(p.Pos.X), floor(p.Pos.Y + 1.0 - 0.1), floor(p.Pos.Z)}).fluid != noFluid {
+			p.Vel.Y += (ly - p.Vel.Y) * d1
+		}
+	}
 	if p.InWater || p.InLava {
 		p.travelInFluid(w, input)
 	} else {
@@ -357,19 +525,16 @@ func (p *Player) moveRelative(speed float32, input r3.Vec) {
 	}
 	v := input
 	if d > 1 {
-		l := math.Sqrt(d)
-		if l < 1e-5 {
-			return
-		}
-		v = r3.Scale(1/l, v)
+		v = normalize(v)
 	}
 	v = r3.Scale(float64(speed), v)
-	r := float64(p.Yaw * (math.Pi / 180))
+	r := p.Yaw * (math.Pi / 180)
 	s, c := float64(mthSin(r)), float64(mthCos(r))
 	p.Vel = r3.Add(p.Vel, r3.Vec{X: v.X*c - v.Z*s, Y: v.Y, Z: v.Z*c + v.X*s})
 }
 
-// handleOnClimbable は梯子の上での速さの制限（本家の LivingEntity.handleOnClimbable。しゃがみは扱わない）。
+// handleOnClimbable は梯子の上での速さの制限（本家の LivingEntity.handleOnClimbable）。
+// しゃがんでいれば（足場の中を除いて）滑り落ちない。
 func (p *Player) handleOnClimbable(w World) {
 	if !p.onClimbable(w) {
 		return
@@ -378,6 +543,9 @@ func (p *Player) handleOnClimbable(w World) {
 	p.Vel.X = max(-m, min(m, p.Vel.X))
 	p.Vel.Z = max(-m, min(m, p.Vel.Z))
 	p.Vel.Y = max(p.Vel.Y, -m)
+	if p.Vel.Y < 0 && p.infoAt(w, p.blockPosition()).kind != kindScaffolding && p.Sneaking {
+		p.Vel.Y = 0
+	}
 }
 
 // onClimbable は本家の LivingEntity.onClimbable（足元のブロックが梯子・つるか、梯子の上の開いたトラップドア）。
@@ -396,6 +564,13 @@ func (p *Player) onClimbable(w World) bool {
 
 // move は本家の Entity.move（MoverType.SELF）。
 func (p *Player) move(w World, mv r3.Vec) {
+	if lengthSqr(p.stuck) > 1e-7 {
+		// クモの巣などで止められている（makeStuckInBlock のあとの最初の移動）
+		mv = r3.Vec{X: mv.X * p.stuck.X, Y: mv.Y * p.stuck.Y, Z: mv.Z * p.stuck.Z}
+		p.stuck = r3.Vec{}
+		p.Vel = r3.Vec{}
+	}
+	mv = p.maybeBackOffFromEdge(w, mv)
 	res := p.collide(w, p.Box(), mv)
 	d0 := lengthSqr(res)
 	if d0 > 1e-7 || lengthSqr(mv)-d0 < 1e-7 {
@@ -422,24 +597,18 @@ func (p *Player) move(w World, mv r3.Vec) {
 		}
 	}
 	if mv.Y != res.Y {
-		// Block.updateEntityMovementAfterFallOn
+		// Block.updateEntityMovementAfterFallOn。しゃがんでいれば跳ねない（isSuppressingBounce）
 		switch {
-		case on.slime && p.Vel.Y < 0:
-			p.Vel.Y = -p.Vel.Y
-		case on.bed && p.Vel.Y < 0:
-			p.Vel.Y = -p.Vel.Y * float64(float32(0.66))
-		default:
-			if !on.slime && !on.bed {
-				p.Vel.Y = 0
+		case (on.slime || on.bed) && !p.Sneaking:
+			if p.Vel.Y < 0 {
+				if on.slime {
+					p.Vel.Y = -p.Vel.Y
+				} else {
+					p.Vel.Y = -p.Vel.Y * float64(float32(0.66))
+				}
 			}
-		}
-	}
-	if p.OnGround && on.slime {
-		// SlimeBlock.stepOn
-		if d := math.Abs(p.Vel.Y); d < 0.1 {
-			f := 0.4 + d*0.2
-			p.Vel.X *= f
-			p.Vel.Z *= f
+		default:
+			p.Vel.Y = 0
 		}
 	}
 	f := float64(p.blockSpeedFactor(w))
@@ -450,8 +619,9 @@ func (p *Player) move(w World, mv r3.Vec) {
 // collide は本家の Entity.collide（ぶつかったら止まり、地面にいれば段差を上る）。
 func (p *Player) collide(w World, box r3.Box, mv r3.Vec) r3.Vec {
 	res := mv
+	c := p.ctx()
 	if lengthSqr(mv) != 0 {
-		res = collideWithShapes(mv, box, blockBoxes(w, expandTowards(box, mv)))
+		res = collideWithShapes(mv, box, blockBoxes(w, expandTowards(box, mv), c))
 	}
 	cx, cy, cz := mv.X != res.X, mv.Y != res.Y, mv.Z != res.Z
 	landed := cy && mv.Y < 0
@@ -464,7 +634,7 @@ func (p *Player) collide(w World, box r3.Box, mv r3.Vec) r3.Vec {
 		if !landed {
 			b2 = expandTowards(b2, r3.Vec{Y: float64(float32(-1e-5))})
 		}
-		shapes := blockBoxes(w, b2)
+		shapes := blockBoxes(w, b2, c)
 		for _, h := range stepCandidates(b1, shapes, StepHeight, float32(res.Y)) {
 			v := collideWithShapes(r3.Vec{X: mv.X, Y: float64(h), Z: mv.Z}, b1, shapes)
 			if horizontalDistSqr(v) > horizontalDistSqr(res) {
@@ -478,7 +648,7 @@ func (p *Player) collide(w World, box r3.Box, mv r3.Vec) r3.Vec {
 
 // isHorizontalCollisionMinor は本家の LivingEntity.isHorizontalCollisionMinor（入力の向きと動いた向きの差が 8 度未満）。
 func (p *Player) isHorizontalCollisionMinor(v r3.Vec) bool {
-	r := float64(p.Yaw * (math.Pi / 180))
+	r := p.Yaw * (math.Pi / 180)
 	s, c := float64(mthSin(r)), float64(mthCos(r))
 	d2 := float64(p.xxa)*c - float64(p.zza)*s
 	d3 := float64(p.zza)*c + float64(p.xxa)*s
@@ -524,7 +694,7 @@ func (p *Player) findSupportingBlock(w World, q r3.Box) (BlockPos, bool) {
 					continue
 				}
 				hit := false
-				for _, b := range s.CollisionBoxes() {
+				for _, b := range shapeOf(s, y, p.ctx()) {
 					if intersects(moveBox(b, float64(x), float64(y), float64(z)), q) {
 						hit = true
 						break
@@ -606,43 +776,10 @@ func (p *Player) infoAt(w World, pos BlockPos) *stateInfo {
 	return infoOf(s)
 }
 
-// updateFluids は本家の Entity.updateFluidHeightAndDoFluidPushing（流れに押される力は扱わない）。
-func (p *Player) updateFluids(w World) {
-	b := deflate(p.Box(), 0.001)
-	p.InWater, p.WaterHeight = false, 0
-	p.InLava, p.LavaHeight = false, 0
-	for x := floor(b.Min.X); x < ceil(b.Max.X); x++ {
-		for y := floor(b.Min.Y); y < ceil(b.Max.Y); y++ {
-			for z := floor(b.Min.Z); z < ceil(b.Max.Z); z++ {
-				in := p.infoAt(w, BlockPos{x, y, z})
-				if in.fluid == noFluid {
-					continue
-				}
-				h := in.ownHeight()
-				if p.infoAt(w, BlockPos{x, y + 1, z}).fluid == in.fluid {
-					h = 1
-				}
-				top := float64(float32(y) + h)
-				if top < b.Min.Y {
-					continue
-				}
-				d := top - b.Min.Y
-				if in.fluid == water {
-					p.InWater = true
-					p.WaterHeight = max(p.WaterHeight, d)
-				} else {
-					p.LavaHeight = max(p.LavaHeight, d)
-				}
-			}
-		}
-	}
-	p.InLava = p.LavaHeight > 0
-}
-
 // isFree は箱を (dx, dy, dz) 動かした先に、当たり判定も液体も無ければ true（本家の Entity.isFree）。
 func (p *Player) isFree(w World, dx, dy, dz float64) bool {
 	b := moveBox(p.Box(), dx, dy, dz)
-	if len(blockBoxes(w, b)) > 0 {
+	if len(blockBoxes(w, b, p.ctx())) > 0 {
 		return false
 	}
 	for x := floor(b.Min.X); x < ceil(b.Max.X); x++ {

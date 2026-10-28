@@ -4,6 +4,7 @@ import (
 	"math"
 	"sort"
 
+	"github.com/Satoru314/go-mcdriver/data"
 	"gonum.org/v1/gonum/spatial/r3"
 )
 
@@ -122,10 +123,44 @@ func collideWithShapes(mv r3.Vec, box r3.Box, shapes []r3.Box) r3.Vec {
 	return r3.Vec{X: dx, Y: dy, Z: dz}
 }
 
+// collisionContext は本家の EntityCollisionContext のうち、ブロックの当たり判定の形に効くもの。
+// 本家は当たり判定を調べるたびに、そのときのエンティティから作る。
+type collisionContext struct {
+	bottom     float64 // 足の高さ（Entity.getY()）
+	descending bool    // しゃがみのキーを押しているか（Entity.isDescending = isShiftKeyDown）
+}
+
+// isAbove は本家の EntityCollisionContext.isAbove（足が、ブロック y の形の上端 maxY より上にある）。
+func (c collisionContext) isAbove(maxY float64, y int) bool {
+	return c.bottom > float64(y)+maxY-float64(float32(1e-5))
+}
+
+// scaffoldBottomShape は足場の UNSTABLE_SHAPE_BOTTOM（下の 2/16）。
+var scaffoldBottomShape = []r3.Box{{Max: r3.Vec{X: 1, Y: 0.125, Z: 1}}}
+
+// shapeOf は (x, y, z) のブロック s の、c から見た当たり判定の箱（ブロックの中の座標）を返す。
+// ほとんどのブロックは公式データの形のまま。足場だけは本家の ScaffoldingBlock.getCollisionShape をなぞる:
+// 上に立っていて（足が上端より上）しゃがんでいなければ上に乗れる形、
+// 下に何も無い足場（bottom かつ distance が 0 でない）の下の 2/16 は、足がそのブロックより上なら当たる。それ以外は通り抜ける。
+// 粉雪は革のブーツを履いていなければ当たり判定が無い（公式データも空）。
+func shapeOf(s data.BlockState, y int, c collisionContext) []r3.Box {
+	in := infoOf(s)
+	if in.kind == kindScaffolding {
+		if c.isAbove(1, y) && !c.descending {
+			return s.CollisionBoxes()
+		}
+		if in.scaffoldDistance != 0 && in.scaffoldBottom && c.isAbove(0, y) {
+			return scaffoldBottomShape
+		}
+		return nil
+	}
+	return s.CollisionBoxes()
+}
+
 // blockBoxes は q と重なる（面で接するだけのものは除く）ブロックの当たり判定の箱を、ワールドの座標で返す。
 // 本家の BlockCollisions と同じく、フェンスのように 1 ブロックをはみ出す形も拾うため、周りを 1 ブロック広く見る。
 // 読み込まれていないブロックは当たり判定なしとする（本家も同じ）。
-func blockBoxes(w World, q r3.Box) []r3.Box {
+func blockBoxes(w World, q r3.Box, c collisionContext) []r3.Box {
 	x0, x1 := floor(q.Min.X-collisionEpsilon)-1, floor(q.Max.X+collisionEpsilon)+1
 	y0, y1 := floor(q.Min.Y-collisionEpsilon)-1, floor(q.Max.Y+collisionEpsilon)+1
 	z0, z1 := floor(q.Min.Z-collisionEpsilon)-1, floor(q.Max.Z+collisionEpsilon)+1
@@ -137,7 +172,7 @@ func blockBoxes(w World, q r3.Box) []r3.Box {
 				if !ok || s.Block == nil {
 					continue
 				}
-				for _, b := range s.CollisionBoxes() {
+				for _, b := range shapeOf(s, y, c) {
 					wb := moveBox(b, float64(x), float64(y), float64(z))
 					if intersects(wb, q) {
 						out = append(out, wb)

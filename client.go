@@ -255,12 +255,17 @@ func (cl *Client) tickLoop() {
 
 // tick は 1 ティック分の処理をする。物理を 1 ティック進め、本家のクライアントと同じ決まりで位置などを送る。
 func (cl *Client) tick() error {
+	held := cl.actHeld() // 手に持っている物（持ち物の鍵で読むので、cl.mu を持つ前に。actions.go）
 	cl.mu.Lock()
 	defer cl.mu.Unlock()
 	if cl.state != data.StatePlay || !cl.hasPos {
 		return nil
 	}
 	if err := cl.moveTickLocked(); err != nil {
+		return err
+	}
+	// 行動（掘る・置く・攻撃など）は、向きを送ったあとに送る（actions.go）
+	if err := cl.actTickLocked(held); err != nil {
 		return err
 	}
 	// 1.21.2 から、公式のクライアントはティックの終わりに Client Tick End を送る

@@ -292,7 +292,7 @@ func (cl *Client) tick() (err error) {
 			err = panicErr("毎ティックの処理", r)
 		}
 	}()
-	held := cl.actHeld() // 手に持っている物（持ち物の鍵で読むので、cl.mu を持つ前に。actions.go）
+	held, custom := cl.actHeldStack() // 手に持っている物（持ち物の鍵で読むので、cl.mu を持つ前に。actions.go）
 	cl.mu.Lock()
 	defer cl.mu.Unlock()
 	if cl.state != data.StatePlay || !cl.hasPos {
@@ -303,7 +303,7 @@ func (cl *Client) tick() (err error) {
 		return err
 	}
 	// 行動（掘る・置く・攻撃など）は、向きを送ったあとに送る（actions.go）
-	if err := cl.actTickLocked(held); err != nil {
+	if err := cl.actTickLocked(held, custom); err != nil {
 		return err
 	}
 	// 1.21.2 から、公式のクライアントはティックの終わりに Client Tick End を送る
@@ -352,9 +352,7 @@ func (cl *Client) handleCore(p protocol.Packet) error {
 		if err != nil {
 			return fmt.Errorf("mcdriver: Login (play): %w", err)
 		}
-		cl.mu.Lock()
-		cl.login = lp
-		cl.mu.Unlock()
+		cl.setLogin(lp)
 
 	case data.PlayClientboundPlayerPosition:
 		pp, err := packets.ReadPlayerPosition(d)
@@ -420,23 +418,40 @@ func (cl *Client) onTeleport(pp packets.PlayerPosition) error {
 	return nil
 }
 
-// reconfigure は Start Configuration を受け取ったときに、設定の段階に戻ってまた Play に入る。
-func (cl *Client) reconfigure() error {
+// setLogin は Login (play) の中身を覚える。
+func (cl *Client) setLogin(lp packets.LoginPlay) {
 	cl.mu.Lock()
-	cl.state = data.StateConfiguration
-	cl.hasPos = false // 戻ったあとはサーバーが位置を送り直す
-	cl.loadedSent = false
-	cl.reconfigures++
-	err := cl.c.WritePacket(data.PlayServerboundConfigurationAcknowledged, nil)
-	cl.mu.Unlock()
-	if err != nil {
+	defer cl.mu.Unlock()
+	cl.login = lp
+}
+
+// reconfigure は Start Configuration を受け取ったときに、設定の段階に戻ってまた Play に入る。
+// 設定の段階のやりとり（サーバーを待つ）は鍵の外で行う。
+func (cl *Client) reconfigure() error {
+	if err := cl.enterConfiguration(); err != nil {
 		return fmt.Errorf("mcdriver: Acknowledge Configuration を送る: %w", err)
 	}
 	if err := conn.Configure(cl.c, cl.info, cl.reg, false); err != nil {
 		return fmt.Errorf("mcdriver: %w", err)
 	}
-	cl.mu.Lock()
-	cl.state = data.StatePlay
-	cl.mu.Unlock()
+	cl.setState(data.StatePlay)
 	return nil
+}
+
+// enterConfiguration は設定の段階に戻ったことにし、Acknowledge Configuration を送る。
+func (cl *Client) enterConfiguration() error {
+	cl.mu.Lock()
+	defer cl.mu.Unlock()
+	cl.state = data.StateConfiguration
+	cl.hasPos = false // 戻ったあとはサーバーが位置を送り直す
+	cl.loadedSent = false
+	cl.reconfigures++
+	return cl.c.WritePacket(data.PlayServerboundConfigurationAcknowledged, nil)
+}
+
+// setState は段階を st にする。
+func (cl *Client) setState(st string) {
+	cl.mu.Lock()
+	defer cl.mu.Unlock()
+	cl.state = st
 }

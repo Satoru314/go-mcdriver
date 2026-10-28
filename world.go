@@ -275,12 +275,16 @@ func (cl *Client) worldReset(dimType int32, dimName string) error {
 	if err != nil {
 		return fmt.Errorf("mcdriver: ディメンション %s: %w", dimName, err)
 	}
-	ws := worldKey.of(cl)
+	worldKey.of(cl).set(w, dim)
+	return nil
+}
+
+// set は地形を w（ディメンション dim）に入れ替える（明るさの古い印も捨てる）。
+func (ws *worldState) set(w *chunk.World, dim Dimension) {
 	ws.mu.Lock()
+	defer ws.mu.Unlock()
 	ws.w, ws.dim = w, dim
 	ws.staleLight = map[chunk.SectionPos]struct{}{}
-	ws.mu.Unlock()
-	return nil
 }
 
 // defaultBiomeCount は Registry Data にバイオームが無いときに使う数（1.21.4 の公式のバイオームの数）。
@@ -355,15 +359,18 @@ func (cl *Client) worldOnRespawn(d *protocol.Decoder) error {
 	if err != nil {
 		return fmt.Errorf("mcdriver: Respawn: %w", err)
 	}
-	ws := worldKey.of(cl)
-	ws.mu.RLock()
-	same := ws.w != nil && ws.dim.Name == rp.DimensionName
-	ws.mu.RUnlock()
-	if same {
+	if worldKey.of(cl).isDimension(rp.DimensionName) {
 		// 同じディメンションでのリスポーンでは、公式のクライアントもチャンクを捨てない
 		return nil
 	}
 	return cl.worldReset(rp.DimensionType, rp.DimensionName)
+}
+
+// isDimension は、地形を持っていて、そのディメンションの名前が name かを返す。
+func (ws *worldState) isDimension(name string) bool {
+	ws.mu.RLock()
+	defer ws.mu.RUnlock()
+	return ws.w != nil && ws.dim.Name == name
 }
 
 // world は今の World を返す（Login (play) の前なら nil）。
@@ -384,26 +391,32 @@ func (cl *Client) worldOnChunk(d *protocol.Decoder) error {
 	if err != nil {
 		return fmt.Errorf("mcdriver: Chunk Data and Update Light: %w", err)
 	}
+	ws.putColumn(w, col)
+	return nil
+}
+
+// putColumn は展開したチャンク col を地形 w に入れる。展開しているあいだに地形が入れ替わっていたら
+// （受信の goroutine は 1 つなので起きないが念のため）何もしない。
+func (ws *worldState) putColumn(w *chunk.World, col *chunk.Column) {
 	ws.mu.Lock()
-	// 展開しているあいだに入れ替わっていないか（受信の goroutine は 1 つなので起きないが念のため）
-	if ws.w == w {
-		replaced := w.Column(col.X, col.Z) != nil
-		w.Put(col)
-		// このチャンクの明るさは今届いたので新しい
-		ws.clearStaleColumn(col.X, col.Z)
-		if replaced {
-			// 差し替え: 中身がどう変わったか分からないので、隣のチャンクの明るさを全部古いとする
-			for dx := int32(-1); dx <= 1; dx++ {
-				for dz := int32(-1); dz <= 1; dz++ {
-					if dx != 0 || dz != 0 {
-						ws.markStaleColumn(col.X+dx, col.Z+dz)
-					}
+	defer ws.mu.Unlock()
+	if ws.w != w {
+		return
+	}
+	replaced := w.Column(col.X, col.Z) != nil
+	w.Put(col)
+	// このチャンクの明るさは今届いたので新しい
+	ws.clearStaleColumn(col.X, col.Z)
+	if replaced {
+		// 差し替え: 中身がどう変わったか分からないので、隣のチャンクの明るさを全部古いとする
+		for dx := int32(-1); dx <= 1; dx++ {
+			for dz := int32(-1); dz <= 1; dz++ {
+				if dx != 0 || dz != 0 {
+					ws.markStaleColumn(col.X+dx, col.Z+dz)
 				}
 			}
 		}
 	}
-	ws.mu.Unlock()
-	return nil
 }
 
 func (cl *Client) worldOnForget(d *protocol.Decoder) error {
@@ -418,11 +431,11 @@ func (cl *Client) worldOnForget(d *protocol.Decoder) error {
 	}
 	ws := worldKey.of(cl)
 	ws.mu.Lock()
+	defer ws.mu.Unlock()
 	if ws.w != nil {
 		ws.w.Unload(x, z)
 		ws.clearStaleColumn(x, z)
 	}
-	ws.mu.Unlock()
 	return nil
 }
 

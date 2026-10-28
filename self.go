@@ -228,10 +228,7 @@ func (cl *Client) selfOnRespawn(d *protocol.Decoder) error {
 	// リスポーン（または別のディメンションへの移動）のあとは、サーバーが位置を送り直す。
 	// 1.21.4 のサーバーはリスポーンのあと Player Loaded を待つ（来ないと 60 ティックのあいだダメージを受けない）ので、
 	// 次の位置の強制修正のあとにもう一度送るようにする（client.go の onTeleport が送る）
-	cl.mu.Lock()
-	cl.hasPos = false
-	cl.loadedSent = false
-	cl.mu.Unlock()
+	cl.forgetPos()
 
 	ss := selfKey.of(cl)
 	ss.mu.Lock()
@@ -239,6 +236,22 @@ func (cl *Client) selfOnRespawn(d *protocol.Decoder) error {
 	ss.s.GameMode = GameMode(rp.GameMode)
 	ss.s.Dead = false
 	return nil
+}
+
+// forgetPos は、位置を受け取っていない（次の位置の強制修正を待つ）ことにする。
+func (cl *Client) forgetPos() {
+	cl.mu.Lock()
+	defer cl.mu.Unlock()
+	cl.hasPos = false
+	cl.loadedSent = false
+}
+
+// selfEntityID は自分のエンティティ ID を返す（Login (play) の前なら 0）。
+func (cl *Client) selfEntityID() int32 {
+	ss := selfKey.of(cl)
+	ss.mu.RLock()
+	defer ss.mu.RUnlock()
+	return ss.s.EntityID
 }
 
 func (cl *Client) selfOnSetHealth(d *protocol.Decoder) error {
@@ -327,11 +340,7 @@ func (cl *Client) selfOnDamage(d *protocol.Decoder) error {
 	if err != nil {
 		return fmt.Errorf("mcdriver: Damage Event: %w", err)
 	}
-	ss := selfKey.of(cl)
-	ss.mu.RLock()
-	mine := int32(p.EntityID) == ss.s.EntityID
-	ss.mu.RUnlock()
-	if !mine {
+	if int32(p.EntityID) != cl.selfEntityID() {
 		return nil // ほかのエンティティへのダメージは単位 6・10 で扱う
 	}
 	dmg := Damage{
@@ -345,6 +354,7 @@ func (cl *Client) selfOnDamage(d *protocol.Decoder) error {
 	if types := cl.reg.Entries("minecraft:damage_type"); p.SourceTypeID >= 0 && int(p.SourceTypeID) < len(types) {
 		dmg.Type = types[p.SourceTypeID].ID
 	}
+	ss := selfKey.of(cl)
 	ss.mu.Lock()
 	defer ss.mu.Unlock()
 	ss.s.LastDamage, ss.s.HasDamage = dmg, true

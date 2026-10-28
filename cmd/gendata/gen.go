@@ -329,6 +329,15 @@ type consumable struct {
 	Animation      string
 }
 
+// attrModifier は属性の修飾 1 つ（minecraft:attribute_modifiers の modifiers の要素）。
+type attrModifier struct {
+	Attribute string // "minecraft:" を外した属性の名前
+	ID        string // 修飾の ID（名前空間つきのまま）
+	Amount    float64
+	Operation string
+	Slot      string // 省略なら "any"
+}
+
 type item struct {
 	ID           int
 	Name         string
@@ -337,6 +346,7 @@ type item struct {
 	Food         *food
 	Consumable   *consumable
 	Tool         *tool
+	Modifiers    []attrModifier
 }
 
 func loadItems(path string, regs []registry) ([]item, error) {
@@ -393,6 +403,37 @@ func loadItems(path string, regs []registry) ([]item, error) {
 				return nil, err
 			}
 			it.Consumable = &consumable{ConsumeSeconds: cs.ConsumeSeconds, Animation: cs.Animation}
+		}
+		if v, ok := c["minecraft:attribute_modifiers"]; ok {
+			var am struct {
+				Modifiers []struct {
+					Type      string   `json:"type"`
+					ID        string   `json:"id"`
+					Amount    *float64 `json:"amount"`
+					Operation string   `json:"operation"`
+					Slot      string   `json:"slot"`
+				} `json:"modifiers"`
+			}
+			if err := json.Unmarshal(v, &am); err != nil {
+				return nil, fmt.Errorf("%s: attribute_modifiers: %w", name, err)
+			}
+			for _, m := range am.Modifiers {
+				if m.Type == "" || m.ID == "" || m.Amount == nil {
+					return nil, fmt.Errorf("%s: attribute_modifiers に type か id か amount がない: %s", name, v)
+				}
+				switch m.Operation {
+				case "add_value", "add_multiplied_base", "add_multiplied_total":
+				default:
+					return nil, fmt.Errorf("%s: attribute_modifiers の知らない operation %q", name, m.Operation)
+				}
+				slot := m.Slot
+				if slot == "" {
+					slot = "any" // 本家の ItemAttributeModifiers.Entry の既定
+				}
+				it.Modifiers = append(it.Modifiers, attrModifier{
+					Attribute: stripNS(m.Type), ID: m.ID, Amount: *m.Amount, Operation: m.Operation, Slot: slot,
+				})
+			}
 		}
 		if v, ok := c["minecraft:tool"]; ok {
 			var t struct {

@@ -162,13 +162,17 @@ func (cl *Client) timeOnSetTime(d *protocol.Decoder) error {
 	if err != nil {
 		return fmt.Errorf("mcdriver: Update Time: %w", err)
 	}
-	ts := timeKey.of(cl)
-	ts.mu.Lock()
-	ts.t, ts.known, ts.recv = p, true, time.Now()
-	ts.mu.Unlock()
+	timeKey.of(cl).setTime(p)
 	// 1 秒ごとに届くので、HP が減らないまま残っているダメージの種類をここでも知らせる（events.go）
 	cl.flushStaleDamage()
 	return nil
+}
+
+// setTime は届いた時刻を覚える。
+func (ts *timeState) setTime(p packets.SetTime) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	ts.t, ts.known, ts.recv = p, true, time.Now()
 }
 
 func (cl *Client) timeOnGameEvent(d *protocol.Decoder) error {
@@ -176,8 +180,17 @@ func (cl *Client) timeOnGameEvent(d *protocol.Decoder) error {
 	if err != nil {
 		return nil // self.go が切断にする
 	}
-	ts := timeKey.of(cl)
+	if cur, changed := timeKey.of(cl).applyWeather(p); changed {
+		cl.emit(WeatherEvent{eventBase: evNow(), Weather: cur})
+	}
+	return nil
+}
+
+// applyWeather は天気の Game Event を当てはめ、今の天気と、天気の種類（晴れ・雨・雷雨）が変わったかを返す。
+// 天気でない Game Event なら何もしない。
+func (ts *timeState) applyWeather(p packets.GameEvent) (cur Weather, changed bool) {
 	ts.mu.Lock()
+	defer ts.mu.Unlock()
 	old := ts.weather.Kind
 	w := &ts.weather
 	switch p.Event {
@@ -192,16 +205,10 @@ func (cl *Client) timeOnGameEvent(d *protocol.Decoder) error {
 	case packets.GameEventThunderLevel:
 		w.ThunderLevel = clamp01(p.Value)
 	default:
-		ts.mu.Unlock()
-		return nil
+		return *w, false
 	}
 	w.Kind = w.kind()
-	cur := *w
-	ts.mu.Unlock()
-	if cur.Kind != old {
-		cl.emit(WeatherEvent{eventBase: evNow(), Weather: cur})
-	}
-	return nil
+	return *w, w.Kind != old
 }
 
 func clamp01(v float32) float32 { return min(max(v, 0), 1) }
@@ -209,13 +216,17 @@ func clamp01(v float32) float32 { return min(max(v, 0), 1) }
 // timeOnWorldChange は世界が変わったら天気を晴れに戻す（本家のクライアントも世界を作り直す）。
 // 雨ならサーバーが続けて雨の開始と強さを送り直すので、雨の中でリスポーンすると「晴れ」「雨」の知らせが続けて届く。
 func (cl *Client) timeOnWorldChange(*protocol.Decoder) error {
-	ts := timeKey.of(cl)
-	ts.mu.Lock()
-	old := ts.weather.Kind
-	ts.weather = Weather{}
-	ts.mu.Unlock()
-	if old != Clear {
+	if old := timeKey.of(cl).clearWeather(); old != Clear {
 		cl.emit(WeatherEvent{eventBase: evNow(), Weather: Weather{}})
 	}
 	return nil
+}
+
+// clearWeather は天気を晴れに戻し、前の天気の種類を返す。
+func (ts *timeState) clearWeather() WeatherKind {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	old := ts.weather.Kind
+	ts.weather = Weather{}
+	return old
 }

@@ -3,6 +3,7 @@ package mcdriver
 import (
 	"context"
 	"errors"
+	"maps"
 	"math"
 	"testing"
 	"time"
@@ -586,7 +587,7 @@ func TestUseItemAndAttackFromFakeServer(t *testing.T) {
 		t.Errorf("待ったあとの溜め %v、期待 1", ch)
 	}
 	ec := make(chan error, 1)
-	go func() { ec <- c.Attack(50) }()
+	go func() { ec <- c.Attack(context.Background(), 50) }()
 	var rot [2]float32
 	ps = s.readActs(2, &rot)
 	if ps[0].id != data.PlayServerboundInteract {
@@ -605,10 +606,10 @@ func TestUseItemAndAttackFromFakeServer(t *testing.T) {
 	if ch := c.AttackCharge(); ch > 0.5 {
 		t.Errorf("攻撃した直後の溜め %v", ch)
 	}
-	if err := c.Attack(51); !errors.Is(err, ErrOutOfReach) {
+	if err := c.Attack(context.Background(), 51); !errors.Is(err, ErrOutOfReach) {
 		t.Errorf("遠いゾンビ: %v", err)
 	}
-	if err := c.Attack(999); !errors.Is(err, ErrNoEntity) {
+	if err := c.Attack(context.Background(), 999); !errors.Is(err, ErrNoEntity) {
 		t.Errorf("知らないエンティティ: %v", err)
 	}
 
@@ -634,6 +635,163 @@ func TestUseItemAndAttackFromFakeServer(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 	if ch := c.AttackCharge(); ch != 1 {
 		t.Errorf("0.87 秒あとの溜め %v、期待 1", ch)
+	}
+}
+
+// Attack は位置を受け取る前（毎ティックの処理が止まっているあいだ）は送らずに待ち、ctx が終わったら ctx のエラーで戻る。
+func TestAttackWaitsForCtx(t *testing.T) {
+	s, c := playClient(t)
+	zombie, _ := data.EntityTypeByName("zombie")
+	s.send(data.PlayClientboundAddEntity, func(e *protocol.Encoder) {
+		packets.WriteSpawnEntity(e, packets.SpawnEntity{EntityID: 50, UUID: protocol.UUID{5}, Type: int32(zombie.ID), X: 0.5, Y: 0, Z: 1.5})
+	})
+	s.sync()
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err := c.Attack(ctx, 50)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("位置を受け取る前の Attack = %v、期待 context.DeadlineExceeded", err)
+	}
+	if d := time.Since(start); d < 150*time.Millisecond || d > 2*time.Second {
+		t.Errorf("Attack が戻るまで %v（ctx の 200ms で戻るはず）", d)
+	}
+	// 待つのをやめた攻撃は、あとで位置が届いても送らない
+	// （Interact が来たら expect が失敗する）
+	s.teleport(packets.PlayerPosition{TeleportID: 1, X: 0.5, Y: 0, Z: 0.5}, 0.5, 0, 0.5, false)
+	time.Sleep(200 * time.Millisecond)
+	skip := maps.Clone(tickPackets)
+	skip[data.PlayServerboundPlayerLoaded] = true
+	s.send(data.PlayClientboundPing, func(e *protocol.Encoder) { e.WriteInt(1) })
+	s.expect(data.PlayServerboundPong, skip)
+}
+
+// 持ち替えると、サーバーの Update Attributes を待たずに、手に持つ物の既定の修飾（公式データの attribute_modifiers）で
+// 攻撃速度が変わる（本家の LivingEntity.collectEquipmentChanges）。偽のサーバーは Update Attributes を送らない。
+func TestAttackSpeedFollowsHeldItem(t *testing.T) {
+	s, c := actClient(t)
+	// 攻撃速度を -1 する修飾を部品情報で上書きした鉄の剣
+	ce := protocol.NewEncoder()
+	ce.WriteVarInt(1) // 足す
+	ce.WriteVarInt(0) // 消す
+	ce.WriteVarInt(compType(t, "attribute_modifiers"))
+	ce.WriteVarInt(1)
+	ce.WriteVarInt(attributeIDs["attack_speed"])
+	must(t, ce.WriteIdentifier("minecraft:custom_speed"))
+	ce.WriteDouble(-1)
+	ce.WriteVarInt(int32(packets.ModifierAddValue))
+	ce.WriteVarInt(1) // mainhand
+	ce.WriteBool(true)
+	custom := packets.Slot{Count: 1, Item: invItem(t, "iron_sword").ID, Components: ce.Bytes()}
+	startInventory(t, s, 1, map[int]packets.Slot{
+		SlotHotbar + 1: plainSlot(t, "iron_sword", 1),
+		SlotHotbar + 2: plainSlot(t, "iron_axe", 1),
+		SlotHotbar + 3: plainSlot(t, "iron_pickaxe", 1),
+		SlotHotbar + 4: enchantedSword(t), // エンチャントは攻撃速度に関係ない
+		SlotHotbar + 5: custom,
+	})
+	// look はティックの処理が見た手に持つ物、溜め始めてからのティック数、攻撃速度を返す
+	look := func() (held *data.Item, known bool, ticks int, speed float64) {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		as := actKey.of(c)
+		return as.lastHeld, as.heldKnown, as.attackTicks, c.attrLocked(attrAttackSpeed)
+	}
+	waitHeld := func(want *data.Item) {
+		t.Helper()
+		end := time.Now().Add(2 * time.Second)
+		for {
+			if h, ok, _, _ := look(); ok && h == want {
+				return
+			}
+			if time.Now().After(end) {
+				t.Fatalf("手に持つ物が %v にならない", want)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
+	// 攻撃速度は本家と同じく 4 + 修飾（float の値を double にしたもの。足し算は double で行う）。
+	// full は全力になるティック数（本家の計算）
+	base := 4.0
+	for _, tc := range []struct {
+		slot  int
+		item  string
+		speed float64
+		full  int
+	}{
+		{0, "", 4, 5},
+		{1, "iron_sword", base + -2.4000000953674316, 13},
+		{2, "iron_axe", base + -3.0999999046325684, 22},
+		{3, "iron_pickaxe", base + -2.799999952316284, 17},
+		{0, "", 4, 5},
+		{4, "diamond_sword", base + -2.4000000953674316, 13},
+	} {
+		var want *data.Item
+		if tc.item != "" {
+			want = invItem(t, tc.item)
+		}
+		must(t, c.SelectHotbar(tc.slot))
+		waitHeld(want)
+		_, _, ticks, speed := look()
+		ch := c.AttackCharge()
+		if speed != tc.speed {
+			t.Errorf("%q に持ち替えた直後の攻撃速度 %v、期待 %v", tc.item, speed, tc.speed)
+		}
+		if ticks > 3 {
+			t.Errorf("%q に持ち替えたのに溜め直していない（%d ティック）", tc.item, ticks)
+		}
+		// 持ち替えた直後の溜めは、本家の速さで数ティック分だけ
+		if hi := float64(attackStrength(ticks+3, tc.speed)); ch > hi {
+			t.Errorf("%q に持ち替えた直後の溜め %v、%d ティックなら %v 以下のはず", tc.item, ch, ticks, hi)
+		}
+		n := 0
+		for attackStrength(n, speed) < 1 {
+			n++
+		}
+		if n != tc.full {
+			t.Errorf("%q は %d ティックで全力、期待 %d", tc.item, n, tc.full)
+		}
+	}
+
+	// 部品情報で上書きした物: 手元では修飾を当てはめず（前の物の修飾は外す）、サーバーの Update Attributes を使う
+	must(t, c.SelectHotbar(5))
+	waitHeld(invItem(t, "iron_sword"))
+	end := time.Now().Add(2 * time.Second)
+	for {
+		if _, _, _, sp := look(); sp == 4 {
+			break
+		}
+		if time.Now().After(end) {
+			_, _, _, sp := look()
+			t.Fatalf("上書きした剣に持ち替えたあとの攻撃速度 %v、期待 4（前の剣の修飾を外す）", sp)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	s.send(data.PlayClientboundUpdateAttributes, func(e *protocol.Encoder) {
+		must(t, packets.WriteUpdateAttributes(e, packets.UpdateAttributes{EntityID: testLoginPlay.EntityID,
+			Attributes: []packets.Attribute{{ID: attributeIDs["attack_speed"], Base: 4, Modifiers: []packets.AttributeModifier{
+				{ID: "minecraft:custom_speed", Amount: -1, Operation: packets.ModifierAddValue}}}}}))
+	})
+	skip := maps.Clone(tickPackets)
+	skip[data.PlayServerboundSetCarriedItem] = true
+	s.send(data.PlayClientboundPing, func(e *protocol.Encoder) { e.WriteInt(1) })
+	s.expect(data.PlayServerboundPong, skip)
+	time.Sleep(150 * time.Millisecond) // 数ティック進めても手元の修飾で書き換えない
+	if _, _, _, sp := look(); sp != 3 {
+		t.Errorf("サーバーの値が届いたあとの攻撃速度 %v、期待 3", sp)
+	}
+	// 上書きしていない物に戻すと、手元の修飾を当てはめる
+	must(t, c.SelectHotbar(0))
+	waitHeld(nil)
+	if _, _, _, sp := look(); sp != 3 {
+		t.Errorf("素手に戻した直後の攻撃速度 %v、期待 3（上書きした物の修飾は分からないので外せない）", sp)
+	}
+	// 鉄のつるはしに持ち替えると、上書きした物の修飾（-1）は残ったまま、つるはしの修飾が足される
+	// （サーバーの Update Attributes が届けば直る。説明に書いた決まり）
+	must(t, c.SelectHotbar(3))
+	waitHeld(invItem(t, "iron_pickaxe"))
+	if _, _, _, sp := look(); sp != base-1+-2.799999952316284 {
+		t.Errorf("つるはしに持ち替えた直後の攻撃速度 %v、期待 %v", sp, base-1+-2.799999952316284)
 	}
 }
 

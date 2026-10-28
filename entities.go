@@ -211,13 +211,17 @@ func (cl *Client) entOnSpawn(d *protocol.Decoder) error {
 	if t, ok := data.EntityTypeByID(data.EntityTypeID(p.Type)); ok {
 		e.Type = *t
 	}
-	es := entityKey.of(cl)
-	es.mu.Lock()
-	es.ents[p.EntityID] = e
-	snap := es.snapshotLocked(e)
-	es.mu.Unlock()
+	snap := entityKey.of(cl).add(e)
 	cl.emit(EntitySpawnEvent{eventBase: evNow(), Entity: snap}) // events.go
 	return nil
+}
+
+// add はエンティティ e を加え（同じ ID のものは置き換え）、その写しを返す。
+func (es *entityState) add(e *Entity) Entity {
+	es.mu.Lock()
+	defer es.mu.Unlock()
+	es.ents[e.ID] = e
+	return es.snapshotLocked(e)
 }
 
 func (cl *Client) entOnRemove(d *protocol.Decoder) error {
@@ -225,8 +229,16 @@ func (cl *Client) entOnRemove(d *protocol.Decoder) error {
 	if err != nil {
 		return fmt.Errorf("mcdriver: Remove Entities: %w", err)
 	}
-	es := entityKey.of(cl)
+	for _, e := range entityKey.of(cl).remove(ids) {
+		cl.emit(EntityRemoveEvent{eventBase: evNow(), Entity: e}) // events.go
+	}
+	return nil
+}
+
+// remove は ids のエンティティを消し、知っていたものの写しを返す。
+func (es *entityState) remove(ids []int32) []Entity {
 	es.mu.Lock()
+	defer es.mu.Unlock()
 	removed := make([]Entity, 0, len(ids))
 	for _, id := range ids {
 		if e, ok := es.ents[id]; ok {
@@ -234,11 +246,7 @@ func (cl *Client) entOnRemove(d *protocol.Decoder) error {
 		}
 		delete(es.ents, id)
 	}
-	es.mu.Unlock()
-	for _, e := range removed {
-		cl.emit(EntityRemoveEvent{eventBase: evNow(), Entity: e}) // events.go
-	}
-	return nil
+	return removed
 }
 
 func (cl *Client) entOnMove(d *protocol.Decoder, pos, rot bool) error {

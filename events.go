@@ -359,9 +359,13 @@ func (cl *Client) evOnTeleport(d *protocol.Decoder) error {
 		return nil // client.go が切断にする
 	}
 	// client.go の onTeleport が当てはめたあとに呼ばれるので、今の値が直されたあとの位置
-	cl.mu.Lock()
-	ev := TeleportEvent{eventBase: evNow(), Pos: r3.Vec{X: cl.x, Y: cl.y, Z: cl.z}, Yaw: cl.yaw, Pitch: cl.pitch, TeleportID: pp.TeleportID}
-	cl.mu.Unlock()
-	cl.emit(ev)
+	cl.emit(cl.teleportEvent(pp.TeleportID))
 	return nil
+}
+
+// teleportEvent は今の位置と向きで TeleportEvent を作る。
+func (cl *Client) teleportEvent(id int32) TeleportEvent {
+	cl.mu.Lock()
+	defer cl.mu.Unlock()
+	return TeleportEvent{eventBase: evNow(), Pos: r3.Vec{X: cl.x, Y: cl.y, Z: cl.z}, Yaw: cl.yaw, Pitch: cl.pitch, TeleportID: id}
 }

@@ -461,7 +461,9 @@ func TestActionsIntegration(t *testing.T) {
 				e.cmd(fmt.Sprintf("tp %s %v %v %v", sel, zx, zy, zz))
 				time.Sleep(200 * time.Millisecond)
 			}
-			if err := e.cl.Attack(zid); err != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := e.cl.Attack(ctx, zid); err != nil {
 				t.Fatalf("Attack: %v", err)
 			}
 		}
@@ -487,6 +489,66 @@ func TestActionsIntegration(t *testing.T) {
 		}
 		if !(weak > 0 && full > weak*2) {
 			t.Errorf("全力のダメージ %v が溜めの少ない攻撃 %v より十分大きくない", full, weak)
+		}
+		// 素手に持ち替えて全力まで待ち、剣に持ち替えた直後から全力まで待って攻撃すると、全力のダメージになる
+		// （サーバーの Update Attributes を待たずに、手元で剣の攻撃速度を当てはめるので、素手の速さで全力とみなさない）
+		empty := -1
+		inv := e.cl.Inventory()
+		for i, it := range inv.Slots[SlotHotbar : SlotHotbar+9] {
+			if it.Empty() {
+				empty = i
+				break
+			}
+		}
+		if empty < 0 {
+			t.Fatal("ホットバーに空きが無い")
+		}
+		if err := e.cl.SelectHotbar(empty); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(120 * time.Millisecond)
+		e.waitFor(3*time.Second, "素手の溜めが全力", func() bool { return e.cl.AttackCharge() >= 1 })
+		e.hold("iron_sword")
+		// 持ち替えてから全力になるまでの溜めを細かく読み、どれも剣の攻撃速度（本家の float の 1.6）で数えた値であることを確かめる
+		// （素手の攻撃速度 4 のままなら 0.3, 0.5, ... が出る。サーバーの Update Attributes が届く前の数ティックに出やすい）
+		swordDelay := float64(float32(1 / (4 + -2.4000000953674316) * 20))
+		var seen []float64
+		var switched time.Time
+		end := time.Now().Add(3 * time.Second)
+		for {
+			ch := e.cl.AttackCharge()
+			if switched.IsZero() {
+				if ch < 0.5 {
+					switched = time.Now() // 持ち替えに気づいて溜め直した
+				}
+			} else if ch >= 1 {
+				break
+			}
+			if !switched.IsZero() && (len(seen) == 0 || seen[len(seen)-1] != ch) {
+				seen = append(seen, ch)
+			}
+			if time.Now().After(end) {
+				t.Fatalf("持ち替えてから溜めが全力にならない（%v）", seen)
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+		wait := time.Since(switched)
+		for _, ch := range seen {
+			x := ch*swordDelay - 0.5
+			if math.Abs(x-math.Round(x)) > 1e-3 {
+				t.Errorf("持ち替えたあとの溜め %v が剣の攻撃速度で数えた値でない（%v）", ch, seen)
+				break
+			}
+		}
+		attack()
+		time.Sleep(300 * time.Millisecond)
+		h3 := health()
+		t.Logf("持ち替えてから %v 待って全力の攻撃で %.2f のダメージ（HP %.1f → %.1f）", wait, h2-h3, h2, h3)
+		if math.Abs((h2-h3)-full) > 0.05 {
+			t.Errorf("持ち替えた直後から全力まで待った攻撃のダメージ %v、全力のダメージ %v と違う", h2-h3, full)
+		}
+		if wait < 400*time.Millisecond {
+			t.Errorf("剣で全力になるまで %v（本家は 13 ティック = 0.65 秒）", wait)
 		}
 		// 倒れるまで全力で攻撃する
 		for i := 0; i < 8; i++ {

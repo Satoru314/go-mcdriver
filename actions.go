@@ -14,6 +14,9 @@ package mcdriver
 //
 // 受け取るパケット: Acknowledge Block Change、Update Attributes（自分の属性: 届く距離、攻撃速度、採掘の速さなど）、
 // Entity Effect / Remove Entity Effect（採掘速度上昇・低下）、Respawn。
+//
+// 属性は、サーバーの Update Attributes を待たずに、本家のクライアントと同じく手に持つ物の既定の修飾
+// （公式データの attribute_modifiers。剣の攻撃速度など）を手元でも当てはめる（持ち替えた直後の溜めを正しくするため）。
 
 import (
 	"context"
@@ -49,8 +52,6 @@ var (
 	ErrNoAck = errors.New("mcdriver: サーバーから確認（Acknowledge Block Change）が届かない")
 	// ErrBusy は、ほかの Dig がまだ終わっていないときのエラー。
 	ErrBusy = errors.New("mcdriver: ほかの Dig が終わっていない")
-	// ErrNotSpawned は、位置をまだ受け取っていない（ログインやリスポーンの直後）ため、行動を送れないまま時間が過ぎたときのエラー。
-	ErrNotSpawned = errors.New("mcdriver: 位置をまだ受け取っていないので行動を送れない")
 	// ErrNoEntity は、知らないエンティティ ID を攻撃しようとしたときのエラー。
 	ErrNoEntity = errors.New("mcdriver: そのエンティティを知らない")
 )
@@ -85,6 +86,22 @@ var (
 	attrMiningEff       = attrDef{"mining_efficiency", 0, 0, 1024}
 	attrSubmergedMining = attrDef{"submerged_mining_speed", 0.2, 0, 20}
 )
+
+// attrDefs は使う属性の名前 → 既定値と範囲。手に持つ物の修飾を手元で当てはめるのはこれらだけ（ほかの属性は使わない）。
+var attrDefs = func() map[string]attrDef {
+	m := map[string]attrDef{}
+	for _, d := range []attrDef{attrAttackSpeed, attrBlockRange, attrEntityRange, attrBlockBreakSpeed, attrMiningEff, attrSubmergedMining} {
+		m[d.name] = d
+	}
+	return m
+}()
+
+// modifierOps は公式データの operation → 通信の番号。
+var modifierOps = map[string]int8{
+	"add_value":            packets.ModifierAddValue,
+	"add_multiplied_base":  packets.ModifierAddMultipliedBase,
+	"add_multiplied_total": packets.ModifierAddMultipliedTotal,
+}
 
 // attrValue は属性の値を計算する（本家の AttributeInstance.calculateValue と同じ）。
 // a が nil（届いていない）なら既定値。
@@ -154,6 +171,8 @@ type actState struct {
 	// lastHeld は前のティックで手に持っていた物（素手は nil）。heldKnown が false ならまだ見ていない
 	lastHeld  *data.Item
 	heldKnown bool
+	// lastCustom は、前のティックで手に持っていた物が部品情報で attribute_modifiers を上書きしていたか
+	lastCustom bool
 
 	// attrs は自分の属性（Update Attributes。minecraft:attribute の番号 → 最後に届いた値）
 	attrs map[int32]packets.Attribute
@@ -290,6 +309,8 @@ func (cl *Client) actOnRespawn(d *protocol.Decoder) error {
 	if rp.DataKept&1 == 0 {
 		clear(as.attrs)
 	}
+	// 本家はプレイヤーを作り直すので、次のティックで手に持つ物の修飾を当てはめ直す
+	as.heldKnown = false
 	as.attackTicks = 0
 	as.stopUsingLocked()
 	return nil
@@ -307,29 +328,48 @@ type actTask struct {
 // actHeld は手に持っている物（素手は nil）を返す。毎ティックの処理の前に、cl.mu を持たずに呼ぶ
 // （持ち物の鍵 → cl.mu の順でしか鍵を重ねないため）。
 func (cl *Client) actHeld() *data.Item {
+	it, _ := cl.actHeldStack()
+	return it
+}
+
+// actHeldStack は手に持っている物（素手は nil）と、その物が部品情報で attribute_modifiers を上書きしているか
+// （読めない部品情報も上書きとみなす）を返す。actHeld と同じく cl.mu を持たずに呼ぶ。
+func (cl *Client) actHeldStack() (it *data.Item, customAttrs bool) {
 	st := invKey.of(cl)
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	s := st.slots[SlotHotbar+st.selected]
 	if s.Empty() {
-		return nil
+		return nil, false
 	}
 	it, ok := data.ItemByID(s.Item)
 	if !ok {
-		return nil
+		return nil, false
 	}
-	return it
+	return it, packets.TouchesComponent(s.Components, "attribute_modifiers")
 }
 
 // actTickLocked は毎ティックの行動の処理。位置と向きを送ったあとに、cl.mu を持って呼ぶ。
-// held はこのティックの初めに手に持っていた物。
-func (cl *Client) actTickLocked(held *data.Item) error {
+// held はこのティックの初めに手に持っていた物、custom はそれが部品情報で attribute_modifiers を上書きしているか。
+func (cl *Client) actTickLocked(held *data.Item, custom bool) error {
 	as := actKey.of(cl)
+	// 手に持つ物が変わったら、その修飾を属性に当てはめ直す
+	if !as.heldKnown || held != as.lastHeld || custom != as.lastCustom {
+		var old *data.Item
+		if as.heldKnown && !as.lastCustom {
+			old = as.lastHeld
+		}
+		if custom {
+			as.swapHeldModifiers(old, nil)
+		} else {
+			as.swapHeldModifiers(old, held)
+		}
+	}
 	// 攻撃の溜め（本家の Player.tick: 手に持つ物の種類が変わったら溜め直し、毎ティック 1 進む）
 	if as.heldKnown && held != as.lastHeld {
 		as.attackTicks = 0
 	}
-	as.lastHeld, as.heldKnown = held, true
+	as.lastHeld, as.lastCustom, as.heldKnown = held, custom, true
 	as.attackTicks++
 
 	q := as.queue
@@ -346,6 +386,56 @@ func (cl *Client) actTickLocked(held *data.Item) error {
 		as.digDelay--
 	}
 	return nil
+}
+
+// swapHeldModifiers は、利き手の物が old から cur に変わったとして、old の既定の修飾を属性から外し、cur のを付ける
+// （本家の LivingEntity.collectEquipmentChanges: 前の物の修飾を ID で外し、新しい物の修飾を同じ ID のものと置き換えて足す）。
+// 使う属性（attrDefs）だけを扱う。届いていない属性は既定値を元の値として作る。
+// old と cur は、修飾を手元で扱わない物（部品情報で上書きした物）なら nil を渡す。cl.mu を持って呼ぶ。
+//
+// 部品情報で attribute_modifiers を上書きした物は、中身を読まないので修飾が分からない。その物を持っているあいだは
+// 手元では何もせず、サーバーの Update Attributes（持ち替えのあと少しして届く）の値だけを使う。
+func (as *actState) swapHeldModifiers(old, cur *data.Item) {
+	each := func(it *data.Item, f func(id int32, def attrDef, m *data.AttributeModifier)) {
+		if it == nil {
+			return
+		}
+		for i := range it.AttributeModifiers {
+			m := &it.AttributeModifiers[i]
+			def, ok := attrDefs[m.Attribute]
+			id, known := attributeIDs[m.Attribute]
+			if !m.InMainHand() || !ok || !known {
+				continue
+			}
+			f(id, def, m)
+		}
+	}
+	each(old, func(id int32, _ attrDef, m *data.AttributeModifier) {
+		if a, ok := as.attrs[id]; ok {
+			as.attrs[id] = withoutModifier(a, m.ID)
+		}
+	})
+	each(cur, func(id int32, def attrDef, m *data.AttributeModifier) {
+		a, ok := as.attrs[id]
+		if !ok {
+			a = packets.Attribute{ID: id, Base: def.def}
+		}
+		a = withoutModifier(a, m.ID)
+		a.Modifiers = append(a.Modifiers, packets.AttributeModifier{ID: m.ID, Amount: m.Amount, Operation: modifierOps[m.Operation]})
+		as.attrs[id] = a
+	})
+}
+
+// withoutModifier は a から ID が id の修飾を外したものを返す（修飾の並びは作り直すので、a の並びは書き換えない）。
+func withoutModifier(a packets.Attribute, id string) packets.Attribute {
+	mods := make([]packets.AttributeModifier, 0, len(a.Modifiers)+1)
+	for _, m := range a.Modifiers {
+		if m.ID != id {
+			mods = append(mods, m)
+		}
+	}
+	a.Modifiers = mods
+	return a
 }
 
 // nextTick は、次のティックで位置と向きを送ったあとに run を実行し、その結果を返す。
@@ -885,10 +975,11 @@ func waterAmount(s data.BlockState) (int, bool) {
 // PlaceOpts は Place の指定。
 type PlaceOpts struct {
 	// Yaw は置く瞬間に向く横の向き（度。0 が南、90 が西、180 が北、-90 が東）。階段やドアなど、
-	// 置く人の向きで向きが決まるブロックに効く。nil なら指す位置を向いたまま
+	// 置く人の向きで向きが決まるブロックに効く。nil なら指す位置を向いたまま。NaN か無限大なら ErrNotFinite
 	Yaw *float64
 	// Cursor は面の上の指す位置（against の北西の下の角から、x, y, z それぞれ 0〜1）。
-	// 階段やハーフブロックの上下（横の面の上半分を指すと上付き）に効く。nil なら面の真ん中
+	// 階段やハーフブロックの上下（横の面の上半分を指すと上付き）に効く。nil なら面の真ん中。
+	// NaN か無限大なら ErrNotFinite、0〜1 の外ならエラー
 	Cursor *r3.Vec
 }
 
@@ -910,6 +1001,10 @@ type Placed struct {
 func (cl *Client) Place(ctx context.Context, against BlockPos, f Face, opt PlaceOpts) (Placed, error) {
 	var yaw *float32
 	if opt.Yaw != nil {
+		// float32 にすると無限大になる大きすぎる値も同じく扱う
+		if !finite(*opt.Yaw, float64(float32(*opt.Yaw))) {
+			return Placed{}, fmt.Errorf("%w: PlaceOpts.Yaw %v", ErrNotFinite, *opt.Yaw)
+		}
 		y := float32(*opt.Yaw)
 		yaw = &y
 	}
@@ -993,6 +1088,9 @@ func (cl *Client) useOn(ctx context.Context, against BlockPos, f Face, cursor *r
 	c := r3.Add(r3.Vec{X: 0.5, Y: 0.5, Z: 0.5}, r3.Scale(0.5, f.Normal()))
 	if cursor != nil {
 		c = *cursor
+		if !finite(c.X, c.Y, c.Z) {
+			return before, fmt.Errorf("%w: Cursor %v", ErrNotFinite, c)
+		}
 		if c.X < 0 || c.X > 1 || c.Y < 0 || c.Y > 1 || c.Z < 0 || c.Z > 1 {
 			return before, fmt.Errorf("mcdriver: Cursor %v はブロックの外（0〜1）", c)
 		}
@@ -1133,33 +1231,33 @@ const metaIndexLivingFlags = 8
 // （本家の LocalPlayer.onSyncedDataUpdated: 印が立って使っていなければ使い始め、印が消えて使っていればやめる）。
 func (cl *Client) actOnMetadata(d *protocol.Decoder) error {
 	p, _ := packets.ReadSetEntityMetadata(d) // 読めないところは entities.go が記録する。読めた項目だけ使う
-	ss := selfKey.of(cl)
-	ss.mu.RLock()
-	self := ss.s.EntityID
-	ss.mu.RUnlock()
-	if p.EntityID != self {
+	if p.EntityID != cl.selfEntityID() {
 		return nil
 	}
 	for _, m := range p.Entries {
 		if m.Index != metaIndexLivingFlags || m.Type != packets.MetaByte {
 			continue
 		}
-		flag := m.Value.(uint8)&0x01 != 0
-		held := cl.actHeld()
-		cl.mu.Lock()
-		as := actKey.of(cl)
-		switch {
-		case flag && !as.using:
-			as.using, as.useItem = true, held
-			as.useUnconfirmed = -1
-		case flag:
-			as.useUnconfirmed = -1
-		case as.using:
-			as.stopUsingLocked()
-		}
-		cl.mu.Unlock()
+		// 持ち物の鍵は cl.mu より先に取る（actHeld を見よ）
+		cl.actSetUsing(m.Value.(uint8)&0x01 != 0, cl.actHeld())
 	}
 	return nil
+}
+
+// actSetUsing はサーバーの「アイテムを使っている」の印 flag を当てはめる。held は今手に持っている物。
+func (cl *Client) actSetUsing(flag bool, held *data.Item) {
+	cl.mu.Lock()
+	defer cl.mu.Unlock()
+	as := actKey.of(cl)
+	switch {
+	case flag && !as.using:
+		as.using, as.useItem = true, held
+		as.useUnconfirmed = -1
+	case flag:
+		as.useUnconfirmed = -1
+	case as.using:
+		as.stopUsingLocked()
+	}
 }
 
 // useTickLocked は毎ティック、物理の前にアイテムを使っているかを決め直す。cl.mu を持って呼ぶ。
@@ -1192,8 +1290,9 @@ func (cl *Client) usingItemLocked() bool { return actKey.of(cl).using }
 // 届く距離（属性 entity_interaction_range。ふつう 3）は、目からエンティティの当たり判定の箱までで測る。
 // 攻撃すると溜め（AttackCharge）は 0 に戻る。ダメージは溜めの 2 乗くらいに比例する（本家）ので、
 // 全力で攻撃するには AttackCharge が 1 になってから呼ぶ。
-// 位置をまだ受け取っていない（リスポーンの直後など）まま 5 秒たつと ErrNotSpawned。
-func (cl *Client) Attack(id int32) error {
+// 位置をまだ受け取っていない（リスポーンの直後など）あいだは毎ティックの処理が止まるので、送れるまで待つ。
+// ctx が終わったら（送る前なら送らずに）ctx のエラーを返す。
+func (cl *Client) Attack(ctx context.Context, id int32) error {
 	e, ok := cl.Entity(id)
 	if !ok {
 		return fmt.Errorf("%w: %d", ErrNoEntity, id)
@@ -1206,9 +1305,6 @@ func (cl *Client) Attack(id int32) error {
 		return fmt.Errorf("%w: エンティティ %d まで %.2f", ErrOutOfReach, id, d)
 	}
 	center := r3.Scale(0.5, r3.Add(e.Box.Min, e.Box.Max))
-	// ふつうは次のティックで送れるが、位置が届いていない（リスポーン直後など）あいだは毎ティックの処理が止まるので、待つ長さに上限を置く
-	ctx, cancel := context.WithTimeoutCause(context.Background(), ackTimeout, ErrNotSpawned)
-	defer cancel()
 	return cl.nextTick(ctx, func() { cl.aimLocked(center) }, func(cl *Client) error {
 		if err := cl.c.Send(data.PlayServerboundInteract, func(e *protocol.Encoder) error {
 			return packets.WriteInteract(e, packets.Interact{EntityID: id, Type: packets.InteractAttack})
@@ -1223,7 +1319,10 @@ func (cl *Client) Attack(id int32) error {
 
 // AttackCharge は今攻撃したときの溜め（0〜1。1 なら全力）を返す。
 // 本家の Player.getAttackStrengthScale(0.5): (最後に攻撃・持ち替えしてからのティック数 + 0.5) / (20 / 攻撃速度)。
-// 攻撃速度は属性 attack_speed（素手は 4、剣は 1.6 など。サーバーが手に持つ物の修飾付きで送ってくる値）。
+// 攻撃速度は属性 attack_speed（素手は 4、剣は 1.6、鉄の斧は 0.9 など）。本家のクライアントと同じく、持ち替えたら次のティックで
+// 手に持つ物の既定の修飾（公式データの attribute_modifiers）を手元で当てはめ、サーバーの Update Attributes が届いたらその値にする。
+// 部品情報で attribute_modifiers を上書きした物（コマンドで作った物など。エンチャントは関係ない）は、
+// サーバーの Update Attributes が届くまで前の値のまま（持ち替えた直後は正しくないことがある）。
 func (cl *Client) AttackCharge() float64 {
 	cl.mu.Lock()
 	defer cl.mu.Unlock()

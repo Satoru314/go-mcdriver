@@ -109,6 +109,13 @@ func writeItems(w *bytes.Buffer, items []item, blockIndex map[string]int) {
 			}
 			w.WriteString("}")
 		}
+		if len(it.Modifiers) > 0 {
+			w.WriteString(", AttributeModifiers: []AttributeModifier{")
+			for _, m := range it.Modifiers {
+				fmt.Fprintf(w, "{Attribute: %q, ID: %q, Amount: %s, Operation: %q, Slot: %q}, ", m.Attribute, m.ID, f64(m.Amount), m.Operation, m.Slot)
+			}
+			w.WriteString("}")
+		}
 		if t := it.Tool; t != nil {
 			w.WriteString(", Tool: &Tool{")
 			if t.DefaultMiningSpeed != nil {

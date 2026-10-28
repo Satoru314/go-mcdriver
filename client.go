@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"runtime/debug"
 	"strconv"
 	"sync"
 	"time"
@@ -40,6 +41,10 @@ var (
 	ErrEncryption = conn.ErrEncryption
 	// ErrTransfer はサーバーが別のサーバーへの移動を求めたときのエラー。
 	ErrTransfer = conn.ErrTransfer
+	// ErrInternal はドライバの中の処理が panic したときのエラー（受け取ったパケットの処理や毎ティックの処理）。
+	// 接続は切れ、Err がこれを包んだエラー（どこで起きたかと panic の値と呼び出しの記録つき）を返す。
+	// これが出たらドライバの不具合なので、エラーの文字列を添えて知らせてほしい。
+	ErrInternal = errors.New("mcdriver: 中の処理が panic した")
 )
 
 // DisconnectError はサーバーから切断されたときのエラー。Reason に理由が入る。
@@ -211,15 +216,30 @@ func (cl *Client) Err() error {
 }
 
 // shutdown は最初の 1 回だけ理由を記録して接続を閉じる。
+// done を閉じてから接続を閉じる（送ったときに接続が閉じていたら、done も閉じていて Err が理由を返すように）。
 func (cl *Client) shutdown(err error) {
 	cl.stopOnce.Do(func() {
 		cl.errMu.Lock()
 		cl.err = err
 		cl.errMu.Unlock()
-		cl.c.Close()
 		close(cl.done)
+		cl.c.Close()
 		cl.emitDisconnect(err) // 最後の出来事を入れて Events() のチャネルを閉じる（events.go）
 	})
+}
+
+// sendErr は送ったときのエラーを使う側に返す形にする。接続がもう閉じている（conn.ErrClosed）なら、
+// 切断の理由（Err）を包んだエラー（actions.go の closedErr）にする（Close で閉じたなら errors.Is(err, ErrClosed) が真）。
+func (cl *Client) sendErr(err error) error {
+	if err != nil && errors.Is(err, conn.ErrClosed) {
+		return cl.closedErr()
+	}
+	return err
+}
+
+// panicErr は recover した値 r を ErrInternal を包んだエラーにする。
+func panicErr(where string, r any) error {
+	return fmt.Errorf("%w（%s）: %v\n%s", ErrInternal, where, r, debug.Stack())
 }
 
 // readLoop はパケットを受け取り続ける。
@@ -250,14 +270,23 @@ func (cl *Client) tickLoop() {
 		case <-t.C:
 		}
 		if err := cl.tick(); err != nil {
-			cl.shutdown(fmt.Errorf("mcdriver: 送信: %w", err))
+			if !errors.Is(err, ErrInternal) {
+				err = fmt.Errorf("mcdriver: 送信: %w", err)
+			}
+			cl.shutdown(err)
 			return
 		}
 	}
 }
 
 // tick は 1 ティック分の処理をする。物理を 1 ティック進め、本家のクライアントと同じ決まりで位置などを送る。
-func (cl *Client) tick() error {
+// 中で panic したら ErrInternal を包んだエラーにする（接続を切る）。
+func (cl *Client) tick() (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = panicErr("毎ティックの処理", r)
+		}
+	}()
 	held := cl.actHeld() // 手に持っている物（持ち物の鍵で読むので、cl.mu を持つ前に。actions.go）
 	cl.mu.Lock()
 	defer cl.mu.Unlock()
@@ -289,7 +318,13 @@ func (cl *Client) sendTeleportEchoLocked() error {
 
 // handlePlay は Play の段階のパケットを 1 つ処理する。
 // 接続そのものに関わるものはここで扱い、そのあと機能ごとのファイルが登録した処理（handlers.go）を呼ぶ。
-func (cl *Client) handlePlay(p protocol.Packet) error {
+// 処理の中で panic したら（想定外のパケットなど）、ErrInternal を包んだエラーにする（受信の goroutine は接続を切る）。
+func (cl *Client) handlePlay(p protocol.Packet) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = panicErr(fmt.Sprintf("パケット 0x%02x の処理", p.ID), r)
+		}
+	}()
 	if err := cl.handleCore(p); err != nil {
 		return err
 	}

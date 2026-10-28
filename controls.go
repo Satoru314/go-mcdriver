@@ -236,11 +236,14 @@ func (cl *Client) moveTickLocked() error {
 	}
 	ss.mu.RUnlock()
 	ws := worldKey.of(cl)
-	ws.mu.RLock()
-	// 溶岩の流れの強さはディメンションの ultrawarm で変わる。公式のディメンションのうちネザーだけが ultrawarm
-	p.UltraWarm = ws.dim.Name == "minecraft:the_nether"
-	p.Tick(physWorld{ws.w}, in)
-	ws.mu.RUnlock()
+	func() {
+		// 物理の中で panic しても世界の鍵が残らないように defer で外す（client.go の tick が recover する）
+		ws.mu.RLock()
+		defer ws.mu.RUnlock()
+		// 溶岩の流れの強さはディメンションの ultrawarm で変わる。公式のディメンションのうちネザーだけが ultrawarm
+		p.UltraWarm = ws.dim.Name == "minecraft:the_nether"
+		p.Tick(physWorld{ws.w}, in)
+	}()
 	cl.x, cl.y, cl.z = p.Pos.X, p.Pos.Y, p.Pos.Z
 	cl.onGround = p.OnGround
 

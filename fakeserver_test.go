@@ -8,6 +8,7 @@ import (
 	"context"
 	"net"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -65,7 +66,11 @@ func (s *fakeServer) accept() {
 		s.nc = r.nc
 		s.br = bufio.NewReader(r.nc)
 	case <-time.After(5 * time.Second):
-		s.t.Fatal("接続が来ない")
+		// Connect が先にエラーで戻っていれば、その理由を出す（接続が来ない原因を分けるため）
+		if err, ok := connectErrs.Load(s.addr()); ok {
+			s.t.Fatalf("接続が来ない（Connect は先にエラーで戻った: %v）", err)
+		}
+		s.t.Fatal("接続が来ない（Connect はまだ戻っていない）")
 	}
 }
 
@@ -125,11 +130,17 @@ func must(t *testing.T, err error) {
 	}
 }
 
+// connectErrs は connectAsync の Connect がエラーで戻ったときの理由（Addr → error）。accept の時間切れの説明に使う。
+var connectErrs sync.Map
+
 // connectAsync は別の goroutine で Connect する。
 func connectAsync(ctx context.Context, cfg Config) <-chan connectResult {
 	ch := make(chan connectResult, 1)
 	go func() {
 		c, err := Connect(ctx, cfg)
+		if err != nil {
+			connectErrs.Store(cfg.Addr, err)
+		}
 		ch <- connectResult{c, err}
 	}()
 	return ch

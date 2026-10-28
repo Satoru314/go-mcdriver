@@ -104,8 +104,11 @@ func TestMove7bIntegration(t *testing.T) {
 		}
 	})
 
-	// 岸が一番上の水のブロックより 1 段高いと、本家の式ではジャンプでは上がれない（水面から 1.11 上。足は 5.93 相当までしか届かない）。
-	// 上がれないまま壁で浮き沈みしても、強制修正が起きないこと。
+	// 岸が一番上の水のブロックより 1 段高いと、本家の式ではジャンプでも上がれない（水面から 1.11 上）。
+	// 壁で 0.3 の速さをもらえるのは水に触れているティックだけで、水面（足 S-1+8/9）から出る最後のティックに
+	// 0.34 上がって 0.3 をもらい、空中で 0.3 + 0.2156 + 0.1329 + 0.0518 上がっても、足は fy-0.072 までしか届かない
+	// （internal/physics の TestShoreClimbTrace と TestShoreOneBlockHigherBound）。
+	// 壁に押しつけたまま浮き沈みし（足が岸の上面の 0.5 下より上まで上がる）、上がれず、強制修正も起きないこと。
 	t.Run("1段高い岸には上がれない", func(t *testing.T) {
 		t.Parallel()
 		e := newMoveEnv(t)
@@ -115,16 +118,22 @@ func TestMove7bIntegration(t *testing.T) {
 		e.check("池の底")
 		e.cl.SetControls(Controls{Forward: true, Jump: true})
 		top := math.Inf(-1)
+		wallX := float64(e.b) + 11 - physics.HalfWidth
+		atWall := false
 		end := time.Now().Add(6 * time.Second)
 		for time.Now().Before(end) {
 			e.alive()
 			p, _ := e.pos()
 			top = max(top, p.Y)
+			atWall = atWall || p.X == wallX
 			time.Sleep(5 * time.Millisecond)
 		}
-		t.Logf("一番高い足 %.4f（岸の上は %v）", top, fy)
+		t.Logf("一番高い足 %.4f（岸の上は %v、本家の式の上限は %.4f）", top, fy, fy-0.0718)
 		if top >= fy {
 			t.Errorf("岸に上がった（一番高い足 %.4f）", top)
+		}
+		if top < fy-0.5 || !atWall {
+			t.Errorf("壁で浮き沈みしていない（一番高い足 %.4f、壁に着いた %v）", top, atWall)
 		}
 		e.check("池の底に戻る")
 	})

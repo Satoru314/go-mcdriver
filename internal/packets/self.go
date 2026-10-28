@@ -89,9 +89,11 @@ func WritePlayerCombatKill(e *protocol.Encoder, p PlayerCombatKill) error {
 
 // Game Event の種類（Event の値）。
 const (
-	GameEventNoRespawnBlock     uint8 = 0
-	GameEventBeginRaining       uint8 = 1
-	GameEventEndRaining         uint8 = 2
+	GameEventNoRespawnBlock uint8 = 0
+	// 雨の終了と開始。本家の名前（START_RAINING など）と実際の向きが紛らわしいので、
+	// Paper 1.21.4 で確かめた値に合わせた（weather rain で 2、weather clear で 1 が届く）
+	GameEventEndRaining         uint8 = 1
+	GameEventBeginRaining       uint8 = 2
 	GameEventChangeGameMode     uint8 = 3 // Value がゲームモード（0 サバイバル, 1 クリエイティブ, 2 アドベンチャー, 3 スペクテイター）
 	GameEventWinGame            uint8 = 4
 	GameEventDemo               uint8 = 5

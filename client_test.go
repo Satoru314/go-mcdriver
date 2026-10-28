@@ -396,3 +396,31 @@ func TestConnectRepeatNoLeak(t *testing.T) {
 		t.Errorf("ヒープが %d KB から %d KB に増えた", h0/1024, h1/1024)
 	}
 }
+
+// Close のあとに送る操作は、Close で閉じたことが分かるエラー（errors.Is(err, ErrClosed)）を返し、止まらないこと。
+func TestSendAfterClose(t *testing.T) {
+	s := newFakeServer(t)
+	ch := connectAsync(context.Background(), Config{Addr: s.addr(), Username: "bot9"})
+	s.login("bot9", -1)
+	s.configure(true)
+	s.enterPlay()
+	r := wait(t, ch)
+	if r.err != nil {
+		t.Fatal(r.err)
+	}
+	c := r.c
+	c.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	for name, f := range map[string]func() error{
+		"SelectHotbar":   func() error { return c.SelectHotbar(1) },
+		"CloseContainer": c.CloseContainer,
+		"ClickSlot":      func() error { return c.ClickSlot(ctx, 36, 0, ClickPickup) },
+		"StartUseItem":   c.StartUseItem,
+		"StopUseItem":    c.StopUseItem,
+	} {
+		if err := f(); !errors.Is(err, ErrClosed) {
+			t.Errorf("%s = %v、期待 ErrClosed を包んだエラー", name, err)
+		}
+	}
+}

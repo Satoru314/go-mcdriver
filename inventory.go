@@ -474,7 +474,7 @@ func (cl *Client) invSend(id int32, build func(e *protocol.Encoder) error) error
 	if cl.state != data.StatePlay {
 		return ErrNotPlaying
 	}
-	return cl.c.Send(id, build)
+	return cl.sendErr(cl.c.Send(id, build))
 }
 
 // ---- 受け取る ----

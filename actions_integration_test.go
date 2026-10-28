@@ -461,7 +461,9 @@ func TestActionsIntegration(t *testing.T) {
 				e.cmd(fmt.Sprintf("tp %s %v %v %v", sel, zx, zy, zz))
 				time.Sleep(200 * time.Millisecond)
 			}
-			if err := e.cl.Attack(zid); err != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := e.cl.Attack(ctx, zid); err != nil {
 				t.Fatalf("Attack: %v", err)
 			}
 		}

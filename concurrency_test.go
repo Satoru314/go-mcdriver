@@ -154,7 +154,7 @@ func TestConcurrentUseAndClose(t *testing.T) {
 				},
 				"UseBlock":  func() error { return c.UseBlock(context.Background(), BlockPos{X: 8, Y: -61, Z: 9}, Up) },
 				"ClickSlot": func() error { return c.ClickSlot(context.Background(), 36, 0, ClickPickup) },
-				"Attack":    func() error { return c.Attack(100) },
+				"Attack":    func() error { return c.Attack(context.Background(), 100) },
 			}
 			for _, f := range acts {
 				uw.Add(1)

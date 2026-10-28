@@ -3,6 +3,7 @@ package mcdriver
 import (
 	"context"
 	"errors"
+	"maps"
 	"math"
 	"testing"
 	"time"
@@ -586,7 +587,7 @@ func TestUseItemAndAttackFromFakeServer(t *testing.T) {
 		t.Errorf("待ったあとの溜め %v、期待 1", ch)
 	}
 	ec := make(chan error, 1)
-	go func() { ec <- c.Attack(50) }()
+	go func() { ec <- c.Attack(context.Background(), 50) }()
 	var rot [2]float32
 	ps = s.readActs(2, &rot)
 	if ps[0].id != data.PlayServerboundInteract {
@@ -605,10 +606,10 @@ func TestUseItemAndAttackFromFakeServer(t *testing.T) {
 	if ch := c.AttackCharge(); ch > 0.5 {
 		t.Errorf("攻撃した直後の溜め %v", ch)
 	}
-	if err := c.Attack(51); !errors.Is(err, ErrOutOfReach) {
+	if err := c.Attack(context.Background(), 51); !errors.Is(err, ErrOutOfReach) {
 		t.Errorf("遠いゾンビ: %v", err)
 	}
-	if err := c.Attack(999); !errors.Is(err, ErrNoEntity) {
+	if err := c.Attack(context.Background(), 999); !errors.Is(err, ErrNoEntity) {
 		t.Errorf("知らないエンティティ: %v", err)
 	}
 
@@ -635,6 +636,34 @@ func TestUseItemAndAttackFromFakeServer(t *testing.T) {
 	if ch := c.AttackCharge(); ch != 1 {
 		t.Errorf("0.87 秒あとの溜め %v、期待 1", ch)
 	}
+}
+
+// Attack は位置を受け取る前（毎ティックの処理が止まっているあいだ）は送らずに待ち、ctx が終わったら ctx のエラーで戻る。
+func TestAttackWaitsForCtx(t *testing.T) {
+	s, c := playClient(t)
+	zombie, _ := data.EntityTypeByName("zombie")
+	s.send(data.PlayClientboundAddEntity, func(e *protocol.Encoder) {
+		packets.WriteSpawnEntity(e, packets.SpawnEntity{EntityID: 50, UUID: protocol.UUID{5}, Type: int32(zombie.ID), X: 0.5, Y: 0, Z: 1.5})
+	})
+	s.sync()
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err := c.Attack(ctx, 50)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("位置を受け取る前の Attack = %v、期待 context.DeadlineExceeded", err)
+	}
+	if d := time.Since(start); d < 150*time.Millisecond || d > 2*time.Second {
+		t.Errorf("Attack が戻るまで %v（ctx の 200ms で戻るはず）", d)
+	}
+	// 待つのをやめた攻撃は、あとで位置が届いても送らない
+	// （Interact が来たら expect が失敗する）
+	s.teleport(packets.PlayerPosition{TeleportID: 1, X: 0.5, Y: 0, Z: 0.5}, 0.5, 0, 0.5, false)
+	time.Sleep(200 * time.Millisecond)
+	skip := maps.Clone(tickPackets)
+	skip[data.PlayServerboundPlayerLoaded] = true
+	s.send(data.PlayClientboundPing, func(e *protocol.Encoder) { e.WriteInt(1) })
+	s.expect(data.PlayServerboundPong, skip)
 }
 
 func TestWrapDegrees(t *testing.T) {

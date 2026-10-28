@@ -49,8 +49,6 @@ var (
 	ErrNoAck = errors.New("mcdriver: サーバーから確認（Acknowledge Block Change）が届かない")
 	// ErrBusy は、ほかの Dig がまだ終わっていないときのエラー。
 	ErrBusy = errors.New("mcdriver: ほかの Dig が終わっていない")
-	// ErrNotSpawned は、位置をまだ受け取っていない（ログインやリスポーンの直後）ため、行動を送れないまま時間が過ぎたときのエラー。
-	ErrNotSpawned = errors.New("mcdriver: 位置をまだ受け取っていないので行動を送れない")
 	// ErrNoEntity は、知らないエンティティ ID を攻撃しようとしたときのエラー。
 	ErrNoEntity = errors.New("mcdriver: そのエンティティを知らない")
 )
@@ -1192,8 +1190,9 @@ func (cl *Client) usingItemLocked() bool { return actKey.of(cl).using }
 // 届く距離（属性 entity_interaction_range。ふつう 3）は、目からエンティティの当たり判定の箱までで測る。
 // 攻撃すると溜め（AttackCharge）は 0 に戻る。ダメージは溜めの 2 乗くらいに比例する（本家）ので、
 // 全力で攻撃するには AttackCharge が 1 になってから呼ぶ。
-// 位置をまだ受け取っていない（リスポーンの直後など）まま 5 秒たつと ErrNotSpawned。
-func (cl *Client) Attack(id int32) error {
+// 位置をまだ受け取っていない（リスポーンの直後など）あいだは毎ティックの処理が止まるので、送れるまで待つ。
+// ctx が終わったら（送る前なら送らずに）ctx のエラーを返す。
+func (cl *Client) Attack(ctx context.Context, id int32) error {
 	e, ok := cl.Entity(id)
 	if !ok {
 		return fmt.Errorf("%w: %d", ErrNoEntity, id)
@@ -1206,9 +1205,6 @@ func (cl *Client) Attack(id int32) error {
 		return fmt.Errorf("%w: エンティティ %d まで %.2f", ErrOutOfReach, id, d)
 	}
 	center := r3.Scale(0.5, r3.Add(e.Box.Min, e.Box.Max))
-	// ふつうは次のティックで送れるが、位置が届いていない（リスポーン直後など）あいだは毎ティックの処理が止まるので、待つ長さに上限を置く
-	ctx, cancel := context.WithTimeoutCause(context.Background(), ackTimeout, ErrNotSpawned)
-	defer cancel()
 	return cl.nextTick(ctx, func() { cl.aimLocked(center) }, func(cl *Client) error {
 		if err := cl.c.Send(data.PlayServerboundInteract, func(e *protocol.Encoder) error {
 			return packets.WriteInteract(e, packets.Interact{EntityID: id, Type: packets.InteractAttack})

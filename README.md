@@ -73,7 +73,7 @@ func main() {
 | 生き物と物 | `Entities()`, `Entity(id)`, `PlayerNames()` | 見えているエンティティ（種類、位置、速度、向き、体力、落ちているアイテムの中身） |
 | 持ち物 | `Inventory()`, `Container()`, `SelectHotbar(i)`, `ClickSlot(ctx, ...)`, `Drop(ctx, ...)`, `CloseContainer()` | 持ち物と開いている容器。クリックはサーバーに受け入れられたかを確かめて戻る |
 | 移動 | `SetControls(Controls)`, `Controls()`, `Look(yaw, pitch)`, `LookAt(p)`, `Sprinting()`, `Swimming()`, `Pose()` | 前後左右・ジャンプ・走る・しゃがむ。物理（重力、衝突、水）はライブラリが毎ティック計算して位置を送る |
-| 行動 | `Dig(ctx, p, f)`, `DigTicks(p)`, `Place(ctx, against, f, PlaceOpts)`, `UseBlock(ctx, p, f)`, `StartUseItem()`, `StopUseItem()`, `Attack(id)`, `AttackCharge()` | 掘る（壊れたことをサーバーの確認とブロックの変化で確かめる）、向きと面の位置を指定して置く、ブロックを使う（容器なら窓が開くまで待つ）、食べる・弓を引いて放つ、攻撃と溜め |
+| 行動 | `Dig(ctx, p, f)`, `DigTicks(p)`, `Place(ctx, against, f, PlaceOpts)`, `UseBlock(ctx, p, f)`, `StartUseItem()`, `StopUseItem()`, `Attack(ctx, id)`, `AttackCharge()` | 掘る（壊れたことをサーバーの確認とブロックの変化で確かめる）、向きと面の位置を指定して置く、ブロックを使う（容器なら窓が開くまで待つ）、食べる・弓を引いて放つ、攻撃と溜め |
 | 出来事 | `Events()`, `EventsDropped()` | 下の「出来事」 |
 | 世界 | `Time()`, `TimeInfo()`, `Weather()` | 日の数とその日の時刻（0〜23999）、天気（晴れ・雨・雷雨と強さ） |
 | データ | `data` パッケージ | ブロック、アイテム、レシピ、食べ物、当たり判定、エンティティの大きさ（サーバーの jar の公式データから生成） |

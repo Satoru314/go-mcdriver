@@ -299,10 +299,12 @@ func TestInventoryIntegration(t *testing.T) {
 		t.Errorf("剣を拾って戻したあとが RCON と合わない")
 	}
 
-	// ---- カーソルに物を持ったままのクリック: 確かめ用のクリックで物が捨てられない ----
+	// ---- カーソルに物を持ったままのクリック: 物が捨てられない ----
+	// give で渡したときにサーバーが出す見せかけの落ちたアイテム（拾えない PickupDelay 32767 で、次のティックで
+	// 消える）は数えない。サーバーが遅いと、そのアイテムが消える前にここに来ることがある
 	itemsNear := func() bool {
 		t.Helper()
-		return strings.Contains(cmd(fmt.Sprintf("execute if entity @e[type=item,x=%d,y=%d,z=%d,distance=..16]", x, testserver.StandY, z)), "passed")
+		return strings.Contains(cmd(fmt.Sprintf("execute if entity @e[type=item,x=%d,y=%d,z=%d,distance=..16,nbt=!{PickupDelay:32767s}]", x, testserver.StandY, z)), "passed")
 	}
 	stoneBefore := count("minecraft:stone")
 	if inv := cl.Inventory(); !inv.Slots[33].Empty() || !inv.Slots[34].Empty() {
@@ -316,7 +318,7 @@ func TestInventoryIntegration(t *testing.T) {
 		t.Errorf("カーソルの石 %v、期待 stone×60", inv.Cursor)
 	}
 	if itemsNear() {
-		t.Errorf("カーソルに物があるときのクリックで、地面にアイテムが出た（確かめ用のクリックで捨てられた）")
+		t.Errorf("カーソルに物があるときのクリックで、地面にアイテムが出た")
 	}
 	if n := count("minecraft:stone"); n != stoneBefore {
 		t.Errorf("カーソルに物があるあいだの石の数（RCON、カーソルを含む）%d、期待 %d", n, stoneBefore)
@@ -381,5 +383,57 @@ func TestInventoryIntegration(t *testing.T) {
 		t.Errorf("読めなかったパケット %d（最後 %v）", n, last)
 	}
 	t.Logf("最後の持ち物: %s", describeInv(cl.Inventory()))
-	t.Logf("サーバーのログ（最後の 15 行。確かめ用のクリックの警告が無いかを見る）:\n%s", testserver.Logs(context.Background(), 15))
+	t.Logf("サーバーのログ（最後の 15 行。クリックの警告が無いかを見る）:\n%s", testserver.Logs(context.Background(), 15))
+}
+
+// 続けて速くクリックしても、クリックごとの結果を取り違えない。CI でだけ落ちた TestInventoryIntegration の再現
+// （Paper は窓の全体を送るたびに左手のスロットも送って state ID を 1 進めるので、前のクリックの答えを受け取った直後の
+// クリックは古い state ID で送られて窓の全体が 2 回届き、余った 1 回を次のクリックの結果と取り違えていた）。
+// 石 64 を拾い、右クリックで中の 9〜34 に 1 個ずつ置くことを、何度か繰り返す。
+func TestInventoryRapidClicksIntegration(t *testing.T) {
+	ts := testserver.Start(t)
+	rc := ts.RCON(t)
+	area := ts.NewArea(t)
+	name := area.BotName
+	defer func() {
+		if t.Failed() {
+			logInvTrace(t, name)
+		}
+	}()
+	area.ForceLoad(t, rc)
+	cl := connectBot(t, ts.GameAddr, name)
+	defer cl.Close()
+	waitSelf(t, cl, 5*time.Second, "位置を受け取る", func(s Self) bool { return s.Spawned })
+	x, z := area.Center()
+	testserver.Command(t, rc, fmt.Sprintf("tp %s %d.5 %d %d.5", name, x, testserver.StandY, z))
+	testserver.Command(t, rc, "gamemode survival "+name)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	const rounds = 5
+	for r := 0; r < rounds; r++ {
+		testserver.Command(t, rc, "clear "+name)
+		testserver.Command(t, rc, "give "+name+" stone 64")
+		waitInv(t, cl, 5*time.Second, "石 64 がホットバー 0 に", func(inv Inventory) bool {
+			return inv.Count("stone") == 64 && inv.Hotbar(0).Count == 64
+		})
+		if err := cl.ClickSlot(ctx, SlotHotbar, 0, ClickPickup); err != nil {
+			t.Fatalf("%d 回目: 石を拾う: %v。持ち物 %s", r, err, describeInv(cl.Inventory()))
+		}
+		for s := SlotMain; s < SlotMain+26; s++ {
+			if err := cl.ClickSlot(ctx, s, 1, ClickPickup); err != nil {
+				t.Fatalf("%d 回目: 右クリックでスロット %d に置く: %v。持ち物 %s", r, s, err, describeInv(cl.Inventory()))
+			}
+		}
+		if err := cl.ClickSlot(ctx, SlotHotbar, 0, ClickPickup); err != nil {
+			t.Fatalf("%d 回目: 残りを戻す: %v", r, err)
+		}
+		inv := cl.Inventory()
+		if inv.Hotbar(0).Count != 64-26 || !inv.Cursor.Empty() || inv.Count("stone") != 64 {
+			t.Fatalf("%d 回目のあと: %s", r, describeInv(inv))
+		}
+	}
+	if !strings.Contains(testserver.Command(t, rc, fmt.Sprintf("execute if items entity %s container.0 minecraft:stone[count=%d]", name, 64-26)), "passed") {
+		t.Errorf("RCON で見たホットバー 0 が石 %d でない", 64-26)
+	}
 }

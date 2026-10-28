@@ -293,6 +293,7 @@ func (cl *Client) tick() (err error) {
 	if cl.state != data.StatePlay || !cl.hasPos {
 		return nil
 	}
+	cl.useTickLocked(held) // アイテムを使っているか（物理の前に。actions.go）
 	if err := cl.moveTickLocked(); err != nil {
 		return err
 	}

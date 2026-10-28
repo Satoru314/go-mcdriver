@@ -158,6 +158,14 @@ type actState struct {
 	attrs map[int32]packets.Attribute
 	// effects は自分にかかっている効果（minecraft:mob_effect の番号 → 強さ amplifier）
 	effects map[int32]int32
+
+	// using はアイテムを使っているか（本家の LocalPlayer.startedUsingItem）。物理の Input.UsingItem になる
+	using bool
+	// useItem は使っている物（使い始めたときに手に持っていた物）。手に持つ物が変わったらやめる
+	useItem *data.Item
+	// useUnconfirmed は、StartUseItem で使い始めたとみなしてから、サーバーの「使っている」の印
+	// （自分の Set Entity Metadata の LivingEntity の印 0x01）がまだ届いていないティックの数。-1 なら届いた
+	useUnconfirmed int
 }
 
 var actKey = newFeature(func(*Client) *actState {
@@ -174,6 +182,7 @@ func init() {
 	onPlay(data.PlayClientboundUpdateMobEffect, (*Client).actOnEffect)
 	onPlay(data.PlayClientboundRemoveMobEffect, (*Client).actOnRemoveEffect)
 	onPlay(data.PlayClientboundRespawn, (*Client).actOnRespawn)
+	onPlay(data.PlayClientboundSetEntityData, (*Client).actOnMetadata)
 }
 
 // attrLocked は自分の属性 def の今の値を返す。cl.mu を持って呼ぶ。
@@ -281,6 +290,7 @@ func (cl *Client) actOnRespawn(d *protocol.Decoder) error {
 		clear(as.attrs)
 	}
 	as.attackTicks = 0
+	as.stopUsingLocked()
 	return nil
 }
 
@@ -452,34 +462,9 @@ func (cl *Client) eyeLocked() r3.Vec {
 	return r3.Vec{X: cl.x, Y: cl.y + float64(physics.EyeHeight), Z: cl.z}
 }
 
-// aimLocked は目の位置から p を向く（controls.go の LookAt と同じ式）。cl.mu を持って呼ぶ。
+// aimLocked は目の位置から p を向く（controls.go の lookAtLocked。yaw は -180 以上 180 未満）。cl.mu を持って呼ぶ。
 func (cl *Client) aimLocked(p r3.Vec) {
-	e := cl.eyeLocked()
-	dx, dy, dz := p.X-e.X, p.Y-e.Y, p.Z-e.Z
-	h := math.Hypot(dx, dz)
-	if h < 1e-9 && math.Abs(dy) < 1e-9 {
-		return
-	}
-	if h >= 1e-9 {
-		cl.yaw = wrapDegrees(float32(math.Atan2(dz, dx)*180/math.Pi) - 90)
-	}
-	cl.pitch = max(-90, min(90, float32(-math.Atan2(dy, h)*180/math.Pi)))
-}
-
-// wrapDegrees は角度を -180 以上 180 未満にする（本家の Mth.wrapDegrees）。
-//
-// 行動の前に向く向きは、サーバーが持つ値（Mth.wrapDegrees で -180〜180 に直した値）と同じ形で送る。
-// Paper 1.21.4 は、tp のあと最初に PlayerMoveEvent を出すとき、前に送られた向き（直す前の値）と今の向き（直した値）が
-// 違うと、その向きのパケットを捨てる（実地テストで、180 を送ったあとの -90 が捨てられた。reports/ の記録を見よ）。
-func wrapDegrees(a float32) float32 {
-	f := float32(math.Mod(float64(a), 360))
-	if f >= 180 {
-		f -= 360
-	}
-	if f < -180 {
-		f += 360
-	}
-	return f
+	cl.lookAtLocked(cl.eyeLocked(), p)
 }
 
 // faceCenter はブロック p の面 f の真ん中の位置を返す。
@@ -1061,17 +1046,65 @@ func (cl *Client) useOn(ctx context.Context, against BlockPos, f Face, cursor *r
 // StartUseItem は手に持っている物を使い始める（Use Item。食べる、飲む、弓を引く、盾を構えるなど）。
 // 送るだけで待たない。食べ物は使い続けると（ふつう 1.6 秒）サーバーが食べ終わりにする。
 // 弓は StopUseItem で放つ。今の向きで使う（向きはパケットにも乗り、サーバーはその向きにしてから使う）。
+//
+// 使っているあいだは、本家と同じく歩く速さが 0.2 倍になり、走れない（物理の Input.UsingItem）。
+// 使い始めたとみなすのは、本家のクライアントが使い始める物（食べ物・飲み物は食べられるとき、弓は矢があるとき、
+// 盾・望遠鏡・トライデント・ヤギの角笛）を手に持って呼んだときと、サーバーが自分の「使っている」の印を送ってきたとき。
+// やめたとみなすのは、StopUseItem、サーバーの印が消えたとき（食べ終わり など）、手に持つ物が変わったとき、リスポーン。
 func (cl *Client) StartUseItem() error {
+	// 持ち物の鍵は cl.mu より先に取る（SelectHotbar は持ち物の鍵を持ったまま cl.mu を取る）
+	held := cl.actHeld()
+	hasArrow := false
+	if held != nil && held.Name == "bow" {
+		inv := cl.Inventory()
+		hasArrow = inv.Count("arrow")+inv.Count("tipped_arrow")+inv.Count("spectral_arrow") > 0
+	}
+	self := cl.Self()
 	cl.mu.Lock()
 	defer cl.mu.Unlock()
 	if cl.state != data.StatePlay {
 		return ErrNotPlaying
 	}
 	seq := cl.nextSeqLocked()
-	return cl.c.Send(data.PlayServerboundUseItem, func(e *protocol.Encoder) error {
+	err := cl.c.Send(data.PlayServerboundUseItem, func(e *protocol.Encoder) error {
 		packets.WriteUseItem(e, packets.UseItem{Hand: packets.HandMain, Sequence: seq, Yaw: cl.yaw, Pitch: cl.pitch})
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	as := actKey.of(cl)
+	if !as.using && startsUsing(held, self, hasArrow) {
+		as.using, as.useItem, as.useUnconfirmed = true, held, 0
+	}
+	return nil
+}
+
+// useConfirmTicks は、StartUseItem で使い始めたとみなしてから、サーバーの「使っている」の印を待つティック数。
+// 届かなければ（サーバーが使わせなかった）やめたとみなす。
+const useConfirmTicks = 20
+
+// startsUsing は、本家のクライアントが Use Item で使い始める（Item.use が CONSUME を返して startUsingItem する）物かを返す。
+// 食べ物は満腹でないか、いつでも食べられるもの（クリエイティブなら満腹でも）。弓は矢があるとき（クリエイティブなら無くても）。
+// 石弓は弾を込めたかが分からないので、ここでは決めない（サーバーの印で分かる）。
+func startsUsing(held *data.Item, self Self, hasArrow bool) bool {
+	if held == nil {
+		return false
+	}
+	creative := self.GameMode == Creative
+	if held.Consumable != nil {
+		if held.Food != nil && !held.Food.CanAlwaysEat && self.Food >= 20 && !creative {
+			return false
+		}
+		return true
+	}
+	switch held.Name {
+	case "bow":
+		return hasArrow || creative
+	case "shield", "spyglass", "trident", "goat_horn":
+		return true
+	}
+	return false
 }
 
 // StopUseItem は使っている物を離す（Player Action の Release Use Item。弓を放つなど）。
@@ -1081,9 +1114,74 @@ func (cl *Client) StopUseItem() error {
 	if cl.state != data.StatePlay {
 		return ErrNotPlaying
 	}
+	actKey.of(cl).stopUsingLocked()
 	// 本家の releaseUsingItem と同じく、位置 (0, 0, 0)、面は下、シーケンス番号は 0
 	return cl.sendPlayerActionLocked(packets.ActionReleaseUseItem, BlockPos{}, Down, 0)
 }
+
+// stopUsingLocked はアイテムを使うのをやめたとする。cl.mu を持って呼ぶ。
+func (as *actState) stopUsingLocked() {
+	as.using, as.useItem, as.useUnconfirmed = false, nil, -1
+}
+
+// metaIndexLivingFlags は LivingEntity の印（Byte。0x01 がアイテムを使っている、0x02 が左手）。
+const metaIndexLivingFlags = 8
+
+// actOnMetadata は自分の Set Entity Metadata から「アイテムを使っている」の印を読む
+// （本家の LocalPlayer.onSyncedDataUpdated: 印が立って使っていなければ使い始め、印が消えて使っていればやめる）。
+func (cl *Client) actOnMetadata(d *protocol.Decoder) error {
+	p, _ := packets.ReadSetEntityMetadata(d) // 読めないところは entities.go が記録する。読めた項目だけ使う
+	ss := selfKey.of(cl)
+	ss.mu.RLock()
+	self := ss.s.EntityID
+	ss.mu.RUnlock()
+	if p.EntityID != self {
+		return nil
+	}
+	for _, m := range p.Entries {
+		if m.Index != metaIndexLivingFlags || m.Type != packets.MetaByte {
+			continue
+		}
+		flag := m.Value.(uint8)&0x01 != 0
+		held := cl.actHeld()
+		cl.mu.Lock()
+		as := actKey.of(cl)
+		switch {
+		case flag && !as.using:
+			as.using, as.useItem = true, held
+			as.useUnconfirmed = -1
+		case flag:
+			as.useUnconfirmed = -1
+		case as.using:
+			as.stopUsingLocked()
+		}
+		cl.mu.Unlock()
+	}
+	return nil
+}
+
+// useTickLocked は毎ティック、物理の前にアイテムを使っているかを決め直す。cl.mu を持って呼ぶ。
+// held はこのティックの初めに手に持っていた物。
+func (cl *Client) useTickLocked(held *data.Item) {
+	as := actKey.of(cl)
+	if !as.using {
+		return
+	}
+	// 本家の LivingEntity.updatingUsingItem: 手に持つ物が変わったらやめる
+	if held != as.useItem {
+		as.stopUsingLocked()
+		return
+	}
+	if as.useUnconfirmed >= 0 {
+		as.useUnconfirmed++
+		if as.useUnconfirmed > useConfirmTicks {
+			as.stopUsingLocked()
+		}
+	}
+}
+
+// usingItemLocked はアイテムを使っているか（物理の Input.UsingItem）を返す。cl.mu を持って呼ぶ。
+func (cl *Client) usingItemLocked() bool { return actKey.of(cl).using }
 
 // ---- 攻撃 ----
 

@@ -1231,33 +1231,33 @@ const metaIndexLivingFlags = 8
 // （本家の LocalPlayer.onSyncedDataUpdated: 印が立って使っていなければ使い始め、印が消えて使っていればやめる）。
 func (cl *Client) actOnMetadata(d *protocol.Decoder) error {
 	p, _ := packets.ReadSetEntityMetadata(d) // 読めないところは entities.go が記録する。読めた項目だけ使う
-	ss := selfKey.of(cl)
-	ss.mu.RLock()
-	self := ss.s.EntityID
-	ss.mu.RUnlock()
-	if p.EntityID != self {
+	if p.EntityID != cl.selfEntityID() {
 		return nil
 	}
 	for _, m := range p.Entries {
 		if m.Index != metaIndexLivingFlags || m.Type != packets.MetaByte {
 			continue
 		}
-		flag := m.Value.(uint8)&0x01 != 0
-		held := cl.actHeld()
-		cl.mu.Lock()
-		as := actKey.of(cl)
-		switch {
-		case flag && !as.using:
-			as.using, as.useItem = true, held
-			as.useUnconfirmed = -1
-		case flag:
-			as.useUnconfirmed = -1
-		case as.using:
-			as.stopUsingLocked()
-		}
-		cl.mu.Unlock()
+		// 持ち物の鍵は cl.mu より先に取る（actHeld を見よ）
+		cl.actSetUsing(m.Value.(uint8)&0x01 != 0, cl.actHeld())
 	}
 	return nil
+}
+
+// actSetUsing はサーバーの「アイテムを使っている」の印 flag を当てはめる。held は今手に持っている物。
+func (cl *Client) actSetUsing(flag bool, held *data.Item) {
+	cl.mu.Lock()
+	defer cl.mu.Unlock()
+	as := actKey.of(cl)
+	switch {
+	case flag && !as.using:
+		as.using, as.useItem = true, held
+		as.useUnconfirmed = -1
+	case flag:
+		as.useUnconfirmed = -1
+	case as.using:
+		as.stopUsingLocked()
+	}
 }
 
 // useTickLocked は毎ティック、物理の前にアイテムを使っているかを決め直す。cl.mu を持って呼ぶ。

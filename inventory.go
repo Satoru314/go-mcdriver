@@ -163,8 +163,12 @@ var (
 	ErrNotPlaying = errors.New("mcdriver: Play の段階でないので送れない")
 )
 
-// probeButton は確かめ用のクリックの button。PICKUP は button 0 / 1 しか処理されないので、何も起きない値にする。
-const probeButton = 5
+// clickStateID はクリックに付ける state ID。サーバーの state ID は 0〜32767 なので、決して合わない。
+// 合わないと、サーバーはクリックを実行したあと必ず窓の全体を送り直す（ClickSlot の「確かめ方」）。
+const clickStateID = -1
+
+// clickRecheck は、届いた内容が予測と違ったときに、次の内容を待つ長さ（ClickSlot の「確かめ方」）。
+const clickRecheck = 250 * time.Millisecond
 
 // clickAnswerTimeout はクリックのあと内容を待つ長さの上限（ctx がもっと短ければそちら）。
 const clickAnswerTimeout = 5 * time.Second
@@ -329,18 +333,22 @@ func (cl *Client) Drop(ctx context.Context, slot int, all bool) error {
 // ClickSlot は今の窓（容器が開いていればその窓、無ければ持ち物の窓）のスロット slot をクリックする
 // （Click Container）。slot は窓の番号（SlotOutside で窓の外）。
 //
-// 送るときは、最後に受け取った state ID と、変わるスロットとカーソルの予測を付け、手元の持ち物も予測どおりに変える。
-// そのあとサーバーに今の窓の全体を送り直してもらい（下の「確かめ方」）、届いた内容が予測と同じなら nil、
+// 送るときは、変わるスロットとカーソルの予測を付け、手元の持ち物も予測どおりに変える。
+// そのあとサーバーから届いた窓の全体（Set Container Content）が予測と同じなら nil、
 // 違えば ErrClickRejected を返す（持ち物と容器はサーバーの内容に直っている）。
 //
 // 予測するのは ClickPickup（左右クリック）、ClickSwap（数字キー）、ClickThrow（捨てる）。
 // ほかの種類（シフトクリックやドラッグなど）と、結果のスロット（クラフトの結果、かまどの出口など）や
 // バンドルのクリックは予測せず、サーバーの内容が届いたら nil を返す（結果は Inventory や Container で見る）。
 //
-// 確かめ方: クリックのあとに、確かめ用のクリック（mode 0 = PICKUP、button 5、スロット -1）を、わざと合わない
-// state ID（-1）で送る。サーバーは state ID が合わなくてもクリックを実行してから窓の全体（Set Container Content）を
-// 送り直すので、それがクリックの結果になる。公式のサーバーは PICKUP を button 0 / 1 のときしか処理しないので、
-// 確かめ用のクリックは実行されても何も起きない（カーソルに物があっても捨てない。実地テストで確かめた）。
+// 確かめ方: クリックは、わざと合わない state ID（-1）で送る。サーバーは state ID が合わなくてもクリックを
+// 実行し、そのあと必ず窓の全体（Set Container Content）を送り直すので、クリック 1 回につき、その結果の内容が
+// 1 つ届く（本物の state ID で送ると、合ったときは変わったスロットだけ、合わなかったときは窓の全体が届き、
+// 届くものの数が決まらない）。
+//
+// それでも、クリックと関係なく窓の全体が届くことがある（Paper はクラフトの結果を取ったときに 2 回送る、
+// プラグインが送り直す など）。そのため、届いた内容が予測と違っても、すぐには ErrClickRejected にせず、
+// clickRecheck のあいだ次の内容を待ち、予測と同じものが届けば nil にする。
 func (cl *Client) ClickSlot(ctx context.Context, slot, button int, mode ClickMode) error {
 	st := invKey.of(cl)
 	st.clickMu.Lock()
@@ -359,7 +367,7 @@ func (cl *Client) ClickSlot(ctx context.Context, slot, button int, mode ClickMod
 	pr := st.predictLocked(slot, button, mode)
 	click := packets.ContainerClick{
 		WindowID: winID,
-		StateID:  st.stateIDLocked(),
+		StateID:  clickStateID,
 		Slot:     int16(slot),
 		Button:   int8(button),
 		Mode:     int32(mode),
@@ -374,24 +382,17 @@ func (cl *Client) ClickSlot(ctx context.Context, slot, button int, mode ClickMod
 			return fmt.Errorf("mcdriver: 変わるスロットが多すぎる: %d", len(click.Changed))
 		}
 	}
-	probe := packets.ContainerClick{WindowID: winID, StateID: -1, Slot: -1, Button: probeButton, Mode: packets.ClickPickup, Carried: click.Carried}
 	seq := st.contentSeq[winID]
 	err := cl.invSend(data.PlayServerboundContainerClick, func(e *protocol.Encoder) error {
 		packets.WriteContainerClick(e, click)
 		return nil
 	})
-	if err == nil {
+	if err == nil && pr.ok {
 		// 手元も予測どおりに変える（公式のクライアントと同じ）
-		if pr.ok {
-			for j, s := range pr.changed {
-				st.setWindowSlotLocked(winID, j, s)
-			}
-			st.carried = pr.carried
+		for j, s := range pr.changed {
+			st.setWindowSlotLocked(winID, j, s)
 		}
-		err = cl.invSend(data.PlayServerboundContainerClick, func(e *protocol.Encoder) error {
-			packets.WriteContainerClick(e, probe)
-			return nil
-		})
+		st.carried = pr.carried
 	}
 	st.mu.Unlock()
 	if err != nil {
@@ -401,40 +402,31 @@ func (cl *Client) ClickSlot(ctx context.Context, slot, button int, mode ClickMod
 	// サーバーから窓の全体が届くのを待つ
 	timer := time.NewTimer(clickAnswerTimeout)
 	defer timer.Stop()
+	var (
+		rejected error            // 最後に届いた内容が予測と違ったときのエラー
+		recheck  <-chan time.Time // 予測と違う内容が届いてから、次の内容を待つ期限
+	)
 	for {
 		st.mu.Lock()
-		got := st.contentSeq[winID] > seq
-		bad := st.contentBad[winID]
+		n := st.contentSeq[winID]
 		ch := st.notify
-		if got {
-			defer st.mu.Unlock()
-			if bad {
-				return fmt.Errorf("mcdriver: クリックのあとの窓の内容が読めなかった: %w", st.lastErr)
+		if n > seq {
+			seq = n
+			err := st.checkClickLocked(winID, pr)
+			if err == nil || !errors.Is(err, ErrClickRejected) {
+				st.mu.Unlock()
+				return err
 			}
-			cur, curWin := st.windowSlotsLocked()
-			if curWin != winID {
-				return fmt.Errorf("%w: 窓が変わった（%d → %d）", ErrClickRejected, winID, curWin)
+			rejected = err
+			if recheck == nil {
+				recheck = time.After(clickRecheck)
 			}
-			if !pr.ok {
-				return nil
-			}
-			for j, want := range pr.changed {
-				if j >= len(cur) || !cur[j].Equal(want) {
-					var have packets.Slot
-					if j < len(cur) {
-						have = cur[j]
-					}
-					return fmt.Errorf("%w: スロット %d は %v、予測は %v", ErrClickRejected, j, toItem(have), toItem(want))
-				}
-			}
-			if !st.carried.Equal(pr.carried) {
-				return fmt.Errorf("%w: カーソルは %v、予測は %v", ErrClickRejected, toItem(st.carried), toItem(pr.carried))
-			}
-			return nil
 		}
 		st.mu.Unlock()
 		select {
 		case <-ch:
+		case <-recheck:
+			return rejected
 		case <-ctx.Done():
 			return fmt.Errorf("mcdriver: クリックの結果を待つ: %w", context.Cause(ctx))
 		case <-cl.Done():
@@ -443,6 +435,34 @@ func (cl *Client) ClickSlot(ctx context.Context, slot, button int, mode ClickMod
 			return ErrClickNoAnswer
 		}
 	}
+}
+
+// checkClickLocked は、届いた窓の内容がクリックの予測 pr と同じかを確かめる。
+// 同じ（か予測していない）なら nil、違えば ErrClickRejected をくるんだエラー。
+func (st *invState) checkClickLocked(winID int32, pr prediction) error {
+	if st.contentBad[winID] {
+		return fmt.Errorf("mcdriver: クリックのあとの窓の内容が読めなかった: %w", st.lastErr)
+	}
+	cur, curWin := st.windowSlotsLocked()
+	if curWin != winID {
+		return fmt.Errorf("%w: 窓が変わった（%d → %d）", ErrClickRejected, winID, curWin)
+	}
+	if !pr.ok {
+		return nil
+	}
+	for j, want := range pr.changed {
+		if j >= len(cur) || !cur[j].Equal(want) {
+			var have packets.Slot
+			if j < len(cur) {
+				have = cur[j]
+			}
+			return fmt.Errorf("%w: スロット %d は %v、予測は %v", ErrClickRejected, j, toItem(have), toItem(want))
+		}
+	}
+	if !st.carried.Equal(pr.carried) {
+		return fmt.Errorf("%w: カーソルは %v、予測は %v", ErrClickRejected, toItem(st.carried), toItem(pr.carried))
+	}
+	return nil
 }
 
 // ---- 送る ----
@@ -688,14 +708,6 @@ func (st *invState) windowLocked() (int32, []packets.Slot) {
 func (st *invState) windowSlotsLocked() ([]packets.Slot, int32) {
 	id, s := st.windowLocked()
 	return s, id
-}
-
-// stateIDLocked は今の窓の state ID を返す。
-func (st *invState) stateIDLocked() int32 {
-	if st.win != nil {
-		return st.win.stateID
-	}
-	return st.stateID
 }
 
 // setInvSlotLocked はプレイヤーの窓のスロット i を変え、開いている容器の持ち物の部分にも写す。

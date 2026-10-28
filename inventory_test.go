@@ -317,17 +317,7 @@ func waitErr(t *testing.T, ch <-chan error) error {
 	}
 }
 
-// expectProbe は確かめるためのクリック（PICKUP、button 5、スロット -1、state ID -1）を待つ。
-func (s *fakeServer) expectProbe(win int32) packets.ContainerClick {
-	s.t.Helper()
-	p := s.expectClick()
-	if p.WindowID != win || p.StateID != -1 || p.Slot != -1 || p.Button != probeButton || p.Mode != packets.ClickPickup || len(p.Changed) != 0 {
-		s.t.Fatalf("確かめのクリック: %+v", p)
-	}
-	return p
-}
-
-// ClickSlot: state ID と予測を正しく送り、サーバーの内容が予測どおりなら nil、違えば ErrClickRejected。
+// ClickSlot: 合わない state ID（-1）と予測を送り、サーバーの内容が予測どおりなら nil、違えば ErrClickRejected。
 func TestClickSlot(t *testing.T) {
 	s, c := playClient(t)
 	sword := enchantedSword(t)
@@ -340,13 +330,12 @@ func TestClickSlot(t *testing.T) {
 	// 1. 左クリックでホットバー 0 の石 64 を拾う
 	ch := clickAsync(c, SlotHotbar, 0, ClickPickup)
 	p := s.expectClick()
-	if p.WindowID != 0 || p.StateID != 5 || p.Slot != SlotHotbar || p.Button != 0 || p.Mode != packets.ClickPickup {
+	if p.WindowID != 0 || p.StateID != clickStateID || p.Slot != SlotHotbar || p.Button != 0 || p.Mode != packets.ClickPickup {
 		t.Fatalf("Click Container: %+v", p)
 	}
 	if len(p.Changed) != 1 || p.Changed[0].Slot != SlotHotbar || !p.Changed[0].Item.Empty() || !p.Carried.Equal(plainSlot(t, "stone", 64)) {
 		t.Fatalf("予測: %+v carried %+v", p.Changed, p.Carried)
 	}
-	s.expectProbe(0)
 	slots[SlotHotbar] = packets.Slot{}
 	s.sendContent(0, 6, slots, plainSlot(t, "stone", 64))
 	if err := waitErr(t, ch); err != nil {
@@ -357,10 +346,9 @@ func TestClickSlot(t *testing.T) {
 	// 2. 右クリックで石 10 の上に 1 個置く（重なる）
 	ch = clickAsync(c, SlotMain, 1, ClickPickup)
 	p = s.expectClick()
-	if p.StateID != 6 || len(p.Changed) != 1 || !p.Changed[0].Item.Equal(plainSlot(t, "stone", 11)) || !p.Carried.Equal(plainSlot(t, "stone", 63)) {
+	if p.StateID != clickStateID || len(p.Changed) != 1 || !p.Changed[0].Item.Equal(plainSlot(t, "stone", 11)) || !p.Carried.Equal(plainSlot(t, "stone", 63)) {
 		t.Fatalf("右クリックの予測: %+v", p)
 	}
-	s.expectProbe(0)
 	slots[SlotMain] = plainSlot(t, "stone", 11)
 	s.sendContent(0, 7, slots, plainSlot(t, "stone", 63))
 	if err := waitErr(t, ch); err != nil {
@@ -373,7 +361,6 @@ func TestClickSlot(t *testing.T) {
 	if len(p.Changed) != 1 || !p.Changed[0].Item.Equal(plainSlot(t, "stone", 63)) || !p.Carried.Equal(sword) || !bytes.Equal(p.Carried.Components, sword.Components) {
 		t.Fatalf("入れ替えの予測: %+v carried %+v", p.Changed, p.Carried)
 	}
-	s.expectProbe(0)
 	// サーバーは受け入れなかった（何も変わらない）
 	s.sendContent(0, 8, slots, plainSlot(t, "stone", 63))
 	if err := waitErr(t, ch); !errors.Is(err, ErrClickRejected) {
@@ -403,7 +390,6 @@ func TestClickSlot(t *testing.T) {
 			t.Errorf("予測のスロット %d", ch.Slot)
 		}
 	}
-	s.expectProbe(0)
 	slots[SlotMain], slots[SlotHotbar+2] = packets.Slot{}, plainSlot(t, "stone", 11)
 	s.sendContent(0, 9, slots, plainSlot(t, "stone", 63))
 	if err := waitErr(t, ch); err != nil {
@@ -416,7 +402,6 @@ func TestClickSlot(t *testing.T) {
 	if p.Mode != packets.ClickQuickMove || len(p.Changed) != 0 || !p.Carried.Equal(plainSlot(t, "stone", 63)) {
 		t.Fatalf("シフトクリック: %+v", p)
 	}
-	s.expectProbe(0)
 	s.sendContent(0, 10, slots, plainSlot(t, "stone", 63))
 	if err := waitErr(t, ch); err != nil {
 		t.Fatalf("シフトクリック: %v", err)
@@ -428,7 +413,6 @@ func TestClickSlot(t *testing.T) {
 	if p.Slot != SlotOutside || len(p.Changed) != 0 || !p.Carried.Empty() {
 		t.Fatalf("窓の外: %+v", p)
 	}
-	s.expectProbe(0)
 	s.sendContent(0, 11, slots, packets.Slot{})
 	if err := waitErr(t, ch); err != nil {
 		t.Fatalf("窓の外: %v", err)
@@ -438,6 +422,48 @@ func TestClickSlot(t *testing.T) {
 	if err := c.ClickSlot(context.Background(), 46, 0, ClickPickup); err == nil {
 		t.Error("46 番でエラーにならない")
 	}
+}
+
+// クリックと関係のない古い窓の全体（Paper がクラフトの結果のあとなどに余分に送るもの）が、クリックの結果より先に
+// 届いても、そのあとに届く結果で確かめる。CI でだけ落ちた TestInventoryIntegration の再現
+// （前のクリックの余分な内容を、次のクリックの結果と取り違えて ErrClickRejected にしていた）。
+func TestClickSlotStaleContent(t *testing.T) {
+	s, c := playClient(t)
+	slots := startInventory(t, s, 1, map[int]packets.Slot{SlotHotbar: plainSlot(t, "stone", 1)})
+	s.sendContent(0, 2, slots, plainSlot(t, "stone", 31))
+	s.sync()
+
+	// 右クリックで 1 個重ねる（1 → 2）
+	ch := clickAsync(c, SlotHotbar, 1, ClickPickup)
+	p := s.expectClick()
+	if p.StateID != clickStateID || len(p.Changed) != 1 || !p.Changed[0].Item.Equal(plainSlot(t, "stone", 2)) {
+		t.Fatalf("右クリック: %+v", p)
+	}
+	// 先に古い内容（クリックの前のまま）と左手のスロットが届き、そのあとクリックの結果が届く
+	s.sendContent(0, 3, slots, plainSlot(t, "stone", 31))
+	s.sendSlot(0, 4, SlotOffhand, packets.Slot{})
+	time.Sleep(50 * time.Millisecond)
+	slots[SlotHotbar] = plainSlot(t, "stone", 2)
+	s.sendContent(0, 5, slots, plainSlot(t, "stone", 30))
+	if err := waitErr(t, ch); err != nil {
+		t.Fatalf("古い内容のあとに結果が届いたクリック: %v", err)
+	}
+	checkItem(t, "ホットバー 0", c.Inventory().Hotbar(0), "stone", 2)
+
+	// 本当に受け入れられなかったときは、clickRecheck のあと ErrClickRejected（内容はサーバーのものに戻る）
+	start := time.Now()
+	ch = clickAsync(c, SlotHotbar, 1, ClickPickup)
+	s.expectClick()
+	s.sendContent(0, 6, slots, plainSlot(t, "stone", 30))
+	if err := waitErr(t, ch); !errors.Is(err, ErrClickRejected) {
+		t.Fatalf("受け入れられなかったクリック: %v", err)
+	}
+	if d := time.Since(start); d < clickRecheck {
+		t.Errorf("clickRecheck（%v）を待たずに戻った: %v", clickRecheck, d)
+	}
+	inv := c.Inventory()
+	checkItem(t, "ホットバー 0（サーバーの内容）", inv.Hotbar(0), "stone", 2)
+	checkItem(t, "カーソル（サーバーの内容）", inv.Cursor, "stone", 30)
 }
 
 // Drop は Click Container の捨てる（mode 4）。1 個と全部。
@@ -454,7 +480,6 @@ func TestDrop(t *testing.T) {
 	if p.Mode != packets.ClickThrow || p.Button != 0 || len(p.Changed) != 1 || !p.Changed[0].Item.Equal(plainSlot(t, "stone", 63)) {
 		t.Fatalf("1 個捨てる: %+v", p)
 	}
-	s.expectProbe(0)
 	slots[SlotHotbar] = plainSlot(t, "stone", 63)
 	s.sendContent(0, 2, slots, packets.Slot{})
 
@@ -465,10 +490,9 @@ func TestDrop(t *testing.T) {
 		ch <- c.Drop(ctx, SlotHotbar, true)
 	}()
 	p = s.expectClick()
-	if p.Mode != packets.ClickThrow || p.Button != 1 || p.StateID != 2 || len(p.Changed) != 1 || !p.Changed[0].Item.Empty() {
+	if p.Mode != packets.ClickThrow || p.Button != 1 || p.StateID != clickStateID || len(p.Changed) != 1 || !p.Changed[0].Item.Empty() {
 		t.Fatalf("全部捨てる: %+v", p)
 	}
-	s.expectProbe(0)
 	slots[SlotHotbar] = packets.Slot{}
 	s.sendContent(0, 3, slots, packets.Slot{})
 	if err := waitErr(t, ch); err != nil {
@@ -490,7 +514,7 @@ func TestClickSlotNoAnswer(t *testing.T) {
 	}
 }
 
-// 容器の窓のクリックは、その窓の番号と state ID で送り、ホットバーの番号は容器の窓の番号になる。
+// 容器の窓のクリックは、その窓の番号で送り、ホットバーの番号は容器の窓の番号になる。
 func TestClickSlotInContainer(t *testing.T) {
 	s, c := playClient(t)
 	startInventory(t, s, 1, nil)
@@ -507,10 +531,9 @@ func TestClickSlotInContainer(t *testing.T) {
 	// 数字キー 0 で、箱の 0 番とホットバー 0（箱の窓では 9+27 = 36 番）を入れ替える
 	ch := clickAsync(c, 0, 0, ClickSwap)
 	p := s.expectClick()
-	if p.WindowID != 3 || p.StateID != 40 || len(p.Changed) != 2 {
+	if p.WindowID != 3 || p.StateID != clickStateID || len(p.Changed) != 2 {
 		t.Fatalf("容器の中のクリック: %+v", p)
 	}
-	s.expectProbe(3)
 	slots[0], slots[36] = packets.Slot{}, plainSlot(t, "oak_log", 5)
 	s.sendContent(3, 41, slots, packets.Slot{})
 	if err := waitErr(t, ch); err != nil {
